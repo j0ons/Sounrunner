@@ -1,0 +1,68 @@
+name: Build Windows Runner
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Run tests
+        shell: pwsh
+        run: pytest
+
+      - name: Build EXE
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Stage package
+        shell: pwsh
+        run: |
+          $PackageRoot = "package\SounRunner"
+          New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
+          Copy-Item ".\dist\SounAlHosnAssessmentRunner.exe" "$PackageRoot\SounAlHosnAssessmentRunner.exe" -Force
+          Copy-Item ".\README.md" "$PackageRoot\README.md" -Force
+          Copy-Item ".\config.example.yaml" "$PackageRoot\config.example.yaml" -Force
+          Copy-Item ".\.env.example" "$PackageRoot\.env.example" -Force
+          Copy-Item ".\version.txt" "$PackageRoot\version.txt" -Force
+          New-Item -ItemType Directory -Force -Path "$PackageRoot\scripts" | Out-Null
+          Copy-Item ".\scripts\install_or_update.ps1" "$PackageRoot\scripts\install_or_update.ps1" -Force
+          Copy-Item ".\scripts\run_assessment.ps1" "$PackageRoot\scripts\run_assessment.ps1" -Force
+          Copy-Item ".\scripts\collect_windows_baseline.ps1" "$PackageRoot\scripts\collect_windows_baseline.ps1" -Force
+          Compress-Archive -Path "$PackageRoot\*" -DestinationPath "SounAlHosnAssessmentRunner-windows.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: soun-runner-windows
+          path: SounAlHosnAssessmentRunner-windows.zip
+
+      - name: Publish GitHub release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SounAlHosnAssessmentRunner-windows.zip

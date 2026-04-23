@@ -10,6 +10,15 @@ Severity = Literal["critical", "high", "medium", "low", "info"]
 Confidence = Literal["confirmed", "strong", "weak", "unknown"]
 FindingStatus = Literal["open", "accepted_risk", "remediated", "not_applicable"]
 ModuleRunStatus = Literal["complete", "partial", "skipped", "failed"]
+FindingBasis = Literal[
+    "direct_system_evidence",
+    "directory_evidence",
+    "network_discovery_evidence",
+    "imported_scanner_evidence",
+    "imported_configuration_evidence",
+    "advisory_questionnaire",
+    "inferred_partial",
+]
 
 
 @dataclass(slots=True)
@@ -31,6 +40,13 @@ class Finding:
     validation_steps: list[str]
     owner_role: str
     effort: str
+    evidence_source_type: str = "unknown"
+    evidence_collected_at: str = ""
+    raw_evidence_path: str = ""
+    finding_basis: FindingBasis = "inferred_partial"
+    asset_role: str = ""
+    asset_criticality: str = ""
+    asset_classification_source: str = ""
     status: FindingStatus = "open"
     risk_score: int = 0
 
@@ -64,9 +80,12 @@ class ModuleResult:
 @dataclass(slots=True)
 class AssessmentResult:
     app_version: str
+    package: str
     session_id: str
     report_pdf: Path
     action_csv: Path
     findings_json: Path
     encrypted_bundle: Path
     findings_count: int
+    callback_status: str = "not_configured"
+    additional_artifacts: list[Path] = field(default_factory=list)

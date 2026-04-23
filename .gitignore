@@ -1,0 +1,12 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.soun_runner_workspace/
+.test-data/
+.test-logs/
+build/
+dist/
+package/
+*.spec
+.env

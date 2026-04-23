@@ -11,6 +11,12 @@ param(
     [string]$LogDir = "",
     [string]$ExePath = "",
     [switch]$Sample,
+    [switch]$Preflight,
+    [switch]$Healthcheck,
+    [switch]$ShowQueue,
+    [switch]$RetryCallbacks,
+    [string]$ResendSession = "",
+    [switch]$ShowCheatsheet,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RunnerArgs
@@ -18,6 +24,35 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$Header = @"
+███████╗ ██████╗ ██╗   ██╗███╗   ██╗     █████╗ ██╗         ██╗  ██╗ ██████╗ ███████╗███╗   ██╗
+██╔════╝██╔═══██╗██║   ██║████╗  ██║    ██╔══██╗██║         ██║  ██║██╔═══██╗██╔════╝████╗  ██║
+███████╗██║   ██║██║   ██║██╔██╗ ██║    ███████║██║         ███████║██║   ██║███████╗██╔██╗ ██║
+╚════██║██║   ██║██║   ██║██║╚██╗██║    ██╔══██║██║         ██╔══██║██║   ██║╚════██║██║╚██╗██║
+███████║╚██████╔╝╚██████╔╝██║ ╚████║    ██║  ██║███████╗    ██║  ██║╚██████╔╝███████║██║ ╚████║
+╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝    ╚═╝  ╚═╝╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝
+
+ ██████╗██╗   ██╗██████╗ ███████╗██████╗ ███████╗███████╗ ██████╗██╗   ██╗██████╗ ██╗████████╗██╗   ██╗
+██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝██║   ██║██╔══██╗██║╚══██╔══╝╚██╗ ██╔╝
+██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝███████╗█████╗  ██║     ██║   ██║██████╔╝██║   ██║    ╚████╔╝
+██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗╚════██║██╔══╝  ██║     ██║   ██║██╔══██╗██║   ██║     ╚██╔╝
+╚██████╗   ██║   ██████╔╝███████╗██║  ██║███████║███████╗╚██████╗╚██████╔╝██║  ██║██║   ██║      ██║
+ ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝
+"@
+Write-Host $Header
+
+if ($ShowCheatsheet) {
+    Write-Host "Operator command cheatsheet"
+    Write-Host "  Preflight:      .\run_assessment.ps1 -Preflight"
+    Write-Host "  Healthcheck:    .\run_assessment.ps1 -Healthcheck"
+    Write-Host "  Run assessment: .\run_assessment.ps1"
+    Write-Host "  Sample run:     .\run_assessment.ps1 -Sample"
+    Write-Host "  Show queue:     .\run_assessment.ps1 -ShowQueue"
+    Write-Host "  Retry queue:    .\run_assessment.ps1 -RetryCallbacks"
+    Write-Host "  Resend session: .\run_assessment.ps1 -ResendSession <session-id>"
+    exit 0
+}
 
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $InstallRoot "config\config.yaml"
@@ -58,6 +93,21 @@ $arguments = @(
 
 if ($Sample) {
     $arguments += "--sample"
+}
+if ($Preflight) {
+    $arguments += "--preflight"
+}
+if ($Healthcheck) {
+    $arguments += "--healthcheck"
+}
+if ($ShowQueue) {
+    $arguments += "--show-queue"
+}
+if ($RetryCallbacks) {
+    $arguments += "--retry-callbacks"
+}
+if ($ResendSession) {
+    $arguments += @("--resend-session", $ResendSession)
 }
 if ($RunnerArgs) {
     $arguments += $RunnerArgs

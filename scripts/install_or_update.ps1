@@ -13,12 +13,13 @@ supported for internal testing but usually require a GitHub token and expire.
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Repository,
+    [string]$Repository = "",
 
     [string]$InstallRoot = "C:\SounRunner",
     [string]$Version = "latest",
     [string]$AssetNamePattern = "SounAlHosnAssessmentRunner-windows*.zip",
+    [string]$LocalZipPath = "",
+    [string]$LocalSourcePath = "",
 
     [switch]$UseActionsArtifact,
     [string]$ArtifactName = "soun-runner-windows",
@@ -29,6 +30,23 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$Header = @"
+███████╗ ██████╗ ██╗   ██╗███╗   ██╗     █████╗ ██╗         ██╗  ██╗ ██████╗ ███████╗███╗   ██╗
+██╔════╝██╔═══██╗██║   ██║████╗  ██║    ██╔══██╗██║         ██║  ██║██╔═══██╗██╔════╝████╗  ██║
+███████╗██║   ██║██║   ██║██╔██╗ ██║    ███████║██║         ███████║██║   ██║███████╗██╔██╗ ██║
+╚════██║██║   ██║██║   ██║██║╚██╗██║    ██╔══██║██║         ██╔══██║██║   ██║╚════██║██║╚██╗██║
+███████║╚██████╔╝╚██████╔╝██║ ╚████║    ██║  ██║███████╗    ██║  ██║╚██████╔╝███████║██║ ╚████║
+╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝    ╚═╝  ╚═╝╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝
+
+ ██████╗██╗   ██╗██████╗ ███████╗██████╗ ███████╗███████╗ ██████╗██╗   ██╗██████╗ ██╗████████╗██╗   ██╗
+██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝██║   ██║██╔══██╗██║╚══██╔══╝╚██╗ ██╔╝
+██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝███████╗█████╗  ██║     ██║   ██║██████╔╝██║   ██║    ╚████╔╝
+██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗╚════██║██╔══╝  ██║     ██║   ██║██╔══██╗██║   ██║     ╚██╔╝
+╚██████╗   ██║   ██████╔╝███████╗██║  ██║███████║███████╗╚██████╗╚██████╔╝██║  ██║██║   ██║      ██║
+ ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝
+"@
+Write-Host $Header
 
 function New-Directory {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -71,6 +89,9 @@ function Save-RemoteFile {
 }
 
 function Get-ReleaseAssetDownload {
+    if (-not $Repository) {
+        throw "Repository is required when downloading from GitHub."
+    }
     if ($Version -eq "latest") {
         $release = Invoke-GitHubJson "https://api.github.com/repos/$Repository/releases/latest"
     }
@@ -95,6 +116,9 @@ function Get-ReleaseAssetDownload {
 }
 
 function Get-ActionsArtifactUrl {
+    if (-not $Repository) {
+        throw "Repository is required when downloading Actions artifacts."
+    }
     if (-not $GitHubToken) {
         throw "Actions artifact download requires GITHUB_TOKEN or -GitHubToken. Use release ZIPs for client installs."
     }
@@ -124,6 +148,47 @@ function Find-RunnerExe {
     return $exe
 }
 
+function Get-PackageVersion {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $versionFile = Join-Path $Root "version.txt"
+    if (-not (Test-Path $versionFile)) {
+        throw "Staged package is missing version.txt."
+    }
+    $version = (Get-Content -Path $versionFile -Raw).Trim()
+    if (-not $version) {
+        throw "version.txt is empty."
+    }
+    return $version
+}
+
+function Test-StagedPackage {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $exe = Find-RunnerExe -Root $Root
+    $packageRoot = $exe.Directory.FullName
+    $version = Get-PackageVersion -Root $packageRoot
+    foreach ($required in @("config.example.yaml", "README.md", "scripts\run_assessment.ps1", "scripts\install_or_update.ps1")) {
+        if (-not (Test-Path (Join-Path $packageRoot $required))) {
+            throw "Staged package is missing required file: $required"
+        }
+    }
+
+    $versionOutput = (& $exe.FullName --version 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runner version command failed during staged validation."
+    }
+    if ($versionOutput -notmatch [regex]::Escape($version)) {
+        throw "Version validation failed. version.txt=$version but EXE reported: $versionOutput"
+    }
+
+    return [pscustomobject]@{
+        Exe = $exe
+        PackageRoot = $packageRoot
+        Version = $version
+        VersionOutput = $versionOutput
+    }
+}
+
 $AppDir = Join-Path $InstallRoot "app"
 $ConfigDir = Join-Path $InstallRoot "config"
 $DataDir = Join-Path $InstallRoot "data"
@@ -143,40 +208,60 @@ New-Directory $LogsDir
 New-Directory $RollbackDir
 New-Directory $TempRoot
 
-Write-Host "Downloading approved Soun Runner package from $Repository..."
-if ($UseActionsArtifact) {
-    $downloadUrl = Get-ActionsArtifactUrl
-    Save-RemoteFile -Uri $downloadUrl -OutFile $DownloadZip -UseAuth
+if ($LocalZipPath -and $LocalSourcePath) {
+    throw "Specify either -LocalZipPath or -LocalSourcePath, not both."
+}
+
+if ($LocalZipPath) {
+    if (-not (Test-Path $LocalZipPath)) {
+        throw "Local ZIP not found: $LocalZipPath"
+    }
+    Write-Host "Using local ZIP package: $LocalZipPath"
+    Copy-Item -Path $LocalZipPath -Destination $DownloadZip -Force
+}
+elseif (-not $LocalSourcePath) {
+    Write-Host "Downloading approved Soun Runner package from $Repository..."
+    if ($UseActionsArtifact) {
+        $downloadUrl = Get-ActionsArtifactUrl
+        Save-RemoteFile -Uri $downloadUrl -OutFile $DownloadZip -UseAuth
+    }
+    else {
+        $download = Get-ReleaseAssetDownload
+        Save-RemoteFile -Uri $download.Uri -OutFile $DownloadZip -UseAuth:([bool]$download.UseAuth)
+    }
+}
+
+if ($LocalSourcePath) {
+    if (-not (Test-Path $LocalSourcePath)) {
+        throw "Local source folder not found: $LocalSourcePath"
+    }
+    Write-Host "Using local source folder: $LocalSourcePath"
+    Copy-Item -Path $LocalSourcePath -Destination $StageDir -Recurse -Force
 }
 else {
-    $download = Get-ReleaseAssetDownload
-    Save-RemoteFile -Uri $download.Uri -OutFile $DownloadZip -UseAuth:([bool]$download.UseAuth)
-}
-
-New-Directory $ExtractDir
-Expand-Archive -Path $DownloadZip -DestinationPath $ExtractDir -Force
-
-$nestedZip = Get-ChildItem -Path $ExtractDir -Filter "SounAlHosnAssessmentRunner-windows*.zip" -Recurse -File |
-    Select-Object -First 1
-if ($nestedZip) {
-    $innerZip = Join-Path $TempRoot "inner-$Stamp.zip"
-    Copy-Item -Path $nestedZip.FullName -Destination $innerZip -Force
-    Remove-Item -Path $ExtractDir -Recurse -Force
     New-Directory $ExtractDir
-    Expand-Archive -Path $innerZip -DestinationPath $ExtractDir -Force
-    Remove-Item -Path $innerZip -Force
-}
+    Expand-Archive -Path $DownloadZip -DestinationPath $ExtractDir -Force
 
-$stagedExe = Find-RunnerExe -Root $ExtractDir
-$packageRoot = $stagedExe.Directory.FullName
-Copy-Item -Path $packageRoot -Destination $StageDir -Recurse -Force
-$finalStagedExe = Find-RunnerExe -Root $StageDir
+    $nestedZip = Get-ChildItem -Path $ExtractDir -Filter "SounAlHosnAssessmentRunner-windows*.zip" -Recurse -File |
+        Select-Object -First 1
+    if ($nestedZip) {
+        $innerZip = Join-Path $TempRoot "inner-$Stamp.zip"
+        Copy-Item -Path $nestedZip.FullName -Destination $innerZip -Force
+        Remove-Item -Path $ExtractDir -Recurse -Force
+        New-Directory $ExtractDir
+        Expand-Archive -Path $innerZip -DestinationPath $ExtractDir -Force
+        Remove-Item -Path $innerZip -Force
+    }
+
+    $stagedExe = Find-RunnerExe -Root $ExtractDir
+    $packageRoot = $stagedExe.Directory.FullName
+    Copy-Item -Path $packageRoot -Destination $StageDir -Recurse -Force
+}
 
 Write-Host "Validating staged build..."
-& $finalStagedExe.FullName --version | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "Staged runner failed version check."
-}
+$stagedValidation = Test-StagedPackage -Root $StageDir
+$StagePackageRoot = $stagedValidation.PackageRoot
+Write-Host $stagedValidation.VersionOutput
 
 $installed = $false
 try {
@@ -184,13 +269,11 @@ try {
         Move-Item -Path $AppDir -Destination $BackupDir -Force
     }
 
-    Move-Item -Path $StageDir -Destination $AppDir -Force
+    Move-Item -Path $StagePackageRoot -Destination $AppDir -Force
 
-    $installedExe = Find-RunnerExe -Root $AppDir
-    & $installedExe.FullName --version | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Installed runner failed version check."
-    }
+    $installedValidation = Test-StagedPackage -Root $AppDir
+    $installedExe = $installedValidation.Exe
+    Write-Host $installedValidation.VersionOutput
 
     $defaultConfig = Join-Path $ConfigDir "config.yaml"
     $exampleConfig = Join-Path $AppDir "config.example.yaml"
@@ -209,11 +292,25 @@ try {
         Copy-Item -Path $installerSource -Destination (Join-Path $InstallRoot "install_or_update.ps1") -Force
     }
 
+    Write-Host "Running installed health check..."
+    & $installedExe.FullName --healthcheck --config $defaultConfig --data-dir $DataDir --log-dir $LogsDir | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed runner healthcheck failed."
+    }
+
     $installed = $true
     Write-Host "Install/update complete: $AppDir"
+    Write-Host "Installed version: $($installedValidation.Version)"
     Write-Host "Preserved config: $ConfigDir"
     Write-Host "Preserved data: $DataDir"
     Write-Host "Preserved logs: $LogsDir"
+    Write-Host ""
+    Write-Host "Operator commands:"
+    Write-Host "  $InstallRoot\run_assessment.ps1 -Healthcheck"
+    Write-Host "  $InstallRoot\run_assessment.ps1 -Preflight"
+    Write-Host "  $InstallRoot\run_assessment.ps1"
+    Write-Host "  $InstallRoot\run_assessment.ps1 -ShowQueue"
+    Write-Host "  $InstallRoot\run_assessment.ps1 -RetryCallbacks"
 }
 finally {
     if (-not $installed) {
@@ -231,5 +328,8 @@ finally {
     }
     if (Test-Path $DownloadZip) {
         Remove-Item -Path $DownloadZip -Force
+    }
+    if (Test-Path $StageDir) {
+        Remove-Item -Path $StageDir -Recurse -Force
     }
 }

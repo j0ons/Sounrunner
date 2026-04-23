@@ -3,15 +3,167 @@ log_root: null
 read_only: true
 log_level: "INFO"
 report_company_name: "Soun Al Hosn Cybersecurity LLC"
+assessment:
+  approved_scope: ""
+  approved_scopes: []
+  host_allowlist: []
+  host_denylist: []
+  ad_domain: ""
+  business_unit: ""
+  scope_labels: {}
+  cloud_tenants: []
+  scanner_sources: []
+  client_domain: ""
+orchestration:
+  enabled: true
+  max_workers: 5
+  per_host_timeout_seconds: 90
+  retry_count: 1
+  ad_computer_timeout_seconds: 30
+remote_windows:
+  enabled: false
+  transport: "winrm"
+  username: ""
+  password_env: "SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD"
+  password_file: ""
+  auth: "default"
+  use_ssl: false
+  port: 5985
+  connection_timeout_seconds: 30
+  operation_timeout_seconds: 60
+  require_discovery_match: true
+active_directory:
+  enabled: false
+  domain: ""
+  computer_limit: 500
+  user_limit: 500
+  stale_account_days: 90
+  include_ou_mapping: true
+  query_timeout_seconds: 30
+  privileged_groups:
+    - "Domain Admins"
+    - "Enterprise Admins"
+asset_classification:
+  critical_assets: []
+  criticality_by_asset: {}
+  criticality_by_subnet: {}
+  criticality_by_site: {}
+  role_overrides: {}
+firewall_vpn_import:
+  enabled: false
+  import_paths: []
+backup_platform_import:
+  enabled: false
+  import_paths: []
+  stale_success_days: 7
+field_validation:
+  enable_winrm_sample_checks: true
+  winrm_sample_targets: []
+  max_samples: 3
 smtp_enabled: false
 smtp:
   host: ""
   port: 587
   username: ""
   password: ""
+  password_env: "SOUN_RUNNER_SMTP_PASSWORD"
+  password_file: ""
   sender: ""
   recipient: ""
 email_security:
-  dkim_selectors:
-    - "selector1"
-    - "selector2"
+  dns_timeout_seconds: 10
+  # Add active selectors only when known. Unknown DKIM selectors are reported as not assessed.
+  dkim_selectors: []
+nmap:
+  enabled: true
+  path: "nmap"
+  profile: "top-ports"
+  service_version_detection: false
+  timeout_seconds: 180
+  top_ports: 100
+standard:
+  enabled: true
+  backup_process_prompt_enabled: true
+  ransomware_score_warn_threshold: 70
+  privileged_access_prompt_enabled: true
+  incident_prompt_enabled: true
+  extended_nmap_top_ports: 200
+  import_scanner_results: true
+advanced:
+  enabled: true
+  questionnaire_enabled: true
+  generate_30_60_90_plan: true
+scanner_integrations:
+  nessus_import_path: ""
+  greenbone_import_path: ""
+  nessus_api:
+    enabled: false
+    base_url: "https://cloud.tenable.com"
+    scan_id: ""
+    history_id: ""
+    export_format: "nessus"
+    timeout_seconds: 60
+    verify_tls: true
+    access_key_env: "SOUN_RUNNER_NESSUS_ACCESS_KEY"
+    secret_key_env: "SOUN_RUNNER_NESSUS_SECRET_KEY"
+    access_key_file: ""
+    secret_key_file: ""
+  greenbone_api:
+    enabled: false
+    host: ""
+    port: 9390
+    username: ""
+    password_env: "SOUN_RUNNER_GREENBONE_PASSWORD"
+    connection_type: "tls"
+    task_id: ""
+    report_id: ""
+    timeout_seconds: 60
+    verify_tls: true
+    password_file: ""
+m365_entra:
+  enabled: false
+  tenant_id: ""
+  client_id: ""
+  client_secret_env: "SOUN_RUNNER_M365_CLIENT_SECRET"
+  client_secret_file: ""
+  authority_host: "login.microsoftonline.com"
+  graph_base_url: "https://graph.microsoft.com"
+  timeout_seconds: 30
+  user_registration_limit: 50
+  legacy_sign_in_lookback_days: 14
+  # Optional fallback import if live Graph access is not available.
+  evidence_json_path: ""
+callback:
+  enabled: false
+  queue_dir: ""
+  send_smtp_summary: false
+  upload_bundle: false
+  max_retry_attempts: 3
+  base_retry_delay_seconds: 60
+  max_retry_delay_seconds: 3600
+  s3:
+    enabled: false
+    endpoint_url: ""
+    bucket: ""
+    key_prefix: "soun-runner"
+    access_key_env: "SOUN_RUNNER_S3_ACCESS_KEY"
+    secret_key_env: "SOUN_RUNNER_S3_SECRET_KEY"
+    access_key_file: ""
+    secret_key_file: ""
+    region_name: "us-east-1"
+  sftp:
+    enabled: false
+    host: ""
+    port: 22
+    username: ""
+    password_env: "SOUN_RUNNER_SFTP_PASSWORD"
+    password_file: ""
+    remote_dir: "/"
+  https:
+    enabled: false
+    url: ""
+    token_env: "SOUN_RUNNER_HTTPS_TOKEN"
+    token_file: ""
+    timeout_seconds: 30
+report:
+  mode: "auto"

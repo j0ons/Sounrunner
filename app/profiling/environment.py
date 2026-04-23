@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from app.collectors.shell import run_command
-from app.collectors.windows import is_windows, powershell_json, run_powershell
+from app.collectors.windows import detect_windows_admin, is_windows, powershell_json, run_powershell
 from app.core.models import ModuleResult
 from app.core.session import AssessmentSession
 
@@ -200,8 +200,7 @@ class EnvironmentProfiler:
 
 
 def _is_admin_windows() -> bool:
-    result = run_command(["whoami", "/groups"], timeout_seconds=15)
-    return "S-1-5-32-544" in result.stdout or "BUILTIN\\Administrators" in result.stdout
+    return detect_windows_admin()
 
 
 def _normalize_network_interfaces(net_info: dict[str, object]) -> list[dict[str, object]]:

@@ -19,6 +19,7 @@ class BundleExporter:
     def export(self, files: list[Path]) -> Path:
         output = self.session.export_dir / "results_bundle.zip"
         password = self._bundle_password()
+        seen: set[Path] = set()
         with pyzipper.AESZipFile(
             output,
             "w",
@@ -27,7 +28,10 @@ class BundleExporter:
         ) as archive:
             archive.setpassword(password)
             for file_path in files:
-                archive.write(file_path, arcname=file_path.name)
+                if file_path in seen or not file_path.exists() or not file_path.is_file():
+                    continue
+                seen.add(file_path)
+                archive.write(file_path, arcname=self._archive_name(file_path))
         return output
 
     def _bundle_password(self) -> bytes:
@@ -35,3 +39,9 @@ class BundleExporter:
         if supplied:
             return supplied.encode("utf-8")
         return self.session.session_id.encode("utf-8")
+
+    def _archive_name(self, file_path: Path) -> str:
+        try:
+            return str(file_path.relative_to(self.session.root))
+        except ValueError:
+            return file_path.name

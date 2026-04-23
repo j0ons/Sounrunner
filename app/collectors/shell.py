@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
+from typing import Mapping
 
 
 @dataclass(slots=True)
@@ -15,7 +16,12 @@ class CommandResult:
     timed_out: bool = False
 
 
-def run_command(command: list[str], timeout_seconds: int = 20) -> CommandResult:
+def run_command(
+    command: list[str],
+    timeout_seconds: int = 20,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> CommandResult:
     """Run a read-only command and capture output without invoking a shell."""
 
     try:
@@ -25,6 +31,7 @@ def run_command(command: list[str], timeout_seconds: int = 20) -> CommandResult:
             check=False,
             text=True,
             timeout=timeout_seconds,
+            env=dict(env) if env is not None else None,
         )
         return CommandResult(
             command=command,
