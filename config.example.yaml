@@ -1,0 +1,17 @@
+workspace_root: ".soun_runner_workspace"
+log_root: null
+read_only: true
+log_level: "INFO"
+report_company_name: "Soun Al Hosn Cybersecurity LLC"
+smtp_enabled: false
+smtp:
+  host: ""
+  port: 587
+  username: ""
+  password: ""
+  sender: ""
+  recipient: ""
+email_security:
+  dkim_selectors:
+    - "selector1"
+    - "selector2"

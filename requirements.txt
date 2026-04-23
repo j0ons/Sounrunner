@@ -1,0 +1,6 @@
+cryptography>=42.0.0
+pyzipper>=0.3.6
+PyYAML>=6.0.0
+reportlab>=4.0.0
+rich>=13.7.0
+pytest>=8.0.0
