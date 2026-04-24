@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
+
+from app.core.input_normalization import normalize_prompt_value
 from app.core.preflight import PreflightReport
+from app.core.scope import LOCAL_ONLY_MARKERS, ScopePolicy
 from app.core.models import AssessmentResult
 from app.core.session import AssessmentIntake
 
@@ -10,11 +15,13 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.prompt import Confirm, Prompt
+    from rich.table import Table
 except ImportError:  # pragma: no cover - fallback for minimal environments.
     Console = None
     Panel = None
     Confirm = None
     Prompt = None
+    Table = None
 
 
 HEADER_ART = """███████╗ ██████╗ ██╗   ██╗███╗   ██╗     █████╗ ██╗         ██╗  ██╗ ██████╗ ███████╗███╗   ██╗
@@ -31,6 +38,12 @@ HEADER_ART = """███████╗ ██████╗ ██╗   █�
 ╚██████╗   ██║   ██████╔╝███████╗██║  ██║███████║███████╗╚██████╗╚██████╔╝██║  ██║██║   ██║      ██║
  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝"""
 
+VALID_PACKAGES = {"basic", "standard", "advanced"}
+YES_VALUES = {"y", "yes", "true", "1"}
+NO_VALUES = {"n", "no", "false", "0"}
+RESERVED_HOST_TOKENS = {"cidr", "subnet", "scope", "network", "ip", "fqdn", "hostname"}
+DOMAIN_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
 
 class ConsoleUi:
     """Terminal-style operator interface."""
@@ -42,32 +55,85 @@ class ConsoleUi:
     def banner(self) -> None:
         text = (
             f"Soun Al Hosn Assessment Runner v{self.app_version}\n"
-            "Read-only local assessment. No stealth. No exploitation. No auto-remediation."
+            "Authorized, read-only cybersecurity assessment orchestration.\n"
+            "No stealth. No exploitation. No persistence. No auto-remediation."
         )
         if self.console and Panel:
-            self.console.print(HEADER_ART, style="bold cyan", overflow="ignore", crop=False)
-            self.console.print(Panel(text, title="Authorized Use Only"))
+            self.console.print(HEADER_ART, style="bold bright_green", overflow="ignore", crop=False)
+            self.console.print(
+                Panel(
+                    text,
+                    title="Authorized Use Only",
+                    subtitle="Scope-Controlled Company Assessment",
+                    border_style="bright_cyan",
+                )
+            )
         else:
             print(HEADER_ART)
             print(text)
 
     def collect_intake(self) -> AssessmentIntake:
-        client = self._ask("Client/entity name")
-        site = self._ask("Site/branch")
-        operator = self._ask("Operator name")
-        package = self._ask("Assessment package [basic/standard/advanced]", default="basic").lower()
-        scope = self._ask("Authorized scope/subnet")
-        allowlist = self._ask("Optional host allowlist (comma-separated IP/FQDN)", default="")
-        denylist = self._ask("Optional host denylist (comma-separated IP/FQDN)", default="")
-        ad_domain = self._ask("Optional AD domain", default="")
-        business_unit = self._ask("Optional business unit label", default="")
-        notes = self._ask("Scope notes", default="No additional notes.")
-        domain = self._ask("Optional email domain for SPF/DKIM/DMARC", default="")
-        m365 = self._confirm("M365/Entra connector available?", default=False)
-        consent = self._confirm(
-            "Confirm written authorization and approved scope are present",
-            default=False,
+        return self.complete_intake(_blank_intake(), prompt_optional=True)
+
+    def complete_intake(
+        self,
+        seed: AssessmentIntake,
+        *,
+        prompt_optional: bool = False,
+    ) -> AssessmentIntake:
+        normalized = _normalize_intake_seed(seed)
+        client = normalized.client_name or self._ask_required("Client/entity name")
+        site = normalized.site or self._ask_required("Site/branch")
+        operator = normalized.operator_name or self._ask_required("Operator name")
+        package = _validated_package(normalized.package) or self._ask_package()
+        scope = _validated_scope(normalized.authorized_scope)
+        if not scope:
+            if normalized.authorized_scope:
+                self.error(
+                    f"Configured scope '{normalized.authorized_scope}' is invalid. "
+                    "Provide CIDR values, local-host-only, or use --scope-from-config with valid config."
+                )
+            scope = self._ask_scope()
+
+        allowlist = self._resolve_host_list(
+            normalized.host_allowlist,
+            prompt="Optional host allowlist (comma-separated IP/FQDN)",
+            prompt_optional=prompt_optional,
         )
+        denylist = self._resolve_host_list(
+            normalized.host_denylist,
+            prompt="Optional host denylist (comma-separated IP/FQDN)",
+            prompt_optional=prompt_optional,
+        )
+        ad_domain = self._resolve_domain_value(
+            normalized.ad_domain or "",
+            prompt="Optional AD domain",
+            field_name="AD domain",
+            prompt_optional=prompt_optional,
+        )
+        business_unit = self._resolve_business_unit(
+            normalized.business_unit,
+            prompt="Optional business unit label",
+            prompt_optional=prompt_optional,
+        )
+        notes = normalized.scope_notes or "No additional notes."
+        if prompt_optional and normalized.scope_notes == "":
+            notes = self._ask("Scope notes", default="No additional notes.")
+        domain = self._resolve_domain_value(
+            normalized.domain or "",
+            prompt="Optional email domain for SPF/DKIM/DMARC",
+            field_name="Email domain",
+            prompt_optional=prompt_optional,
+        )
+        m365 = normalized.m365_connector
+        if prompt_optional and not normalized.m365_connector:
+            m365 = self._confirm("M365/Entra connector available?", default=False)
+        consent = normalized.consent_confirmed
+        if not consent:
+            consent = self._confirm(
+                "Confirm written authorization and approved scope are present",
+                default=False,
+            )
         return AssessmentIntake(
             client_name=client,
             site=site,
@@ -78,11 +144,86 @@ class ConsoleUi:
             consent_confirmed=consent,
             domain=domain or None,
             m365_connector=m365,
-            host_allowlist=_split_csv(allowlist),
-            host_denylist=_split_csv(denylist),
+            host_allowlist=allowlist,
+            host_denylist=denylist,
             ad_domain=ad_domain or None,
             business_unit=business_unit,
+            scope_labels=dict(normalized.scope_labels),
+            scanner_sources=list(normalized.scanner_sources),
+            cloud_tenants=list(normalized.cloud_tenants),
         )
+
+    def print_launch_summary(
+        self,
+        intake: AssessmentIntake,
+        *,
+        non_interactive: bool,
+        report_mode: str,
+        warnings: list[str] | None = None,
+    ) -> None:
+        warnings = warnings or []
+        if self.console and Panel and Table:
+            table = Table(show_header=True, header_style="bold bright_cyan")
+            table.add_column("Package")
+            table.add_column("Launch")
+            table.add_column("Scope")
+            table.add_column("Operator")
+            table.add_column("Report")
+            table.add_row(
+                intake.package,
+                "headless" if non_interactive else "interactive",
+                intake.authorized_scope,
+                intake.operator_name,
+                report_mode,
+            )
+            self.console.print(
+                Panel.fit(
+                    table,
+                    title="Run Contract",
+                    border_style="bright_green",
+                )
+            )
+            if warnings:
+                warning_table = Table(show_header=True, header_style="bold yellow")
+                warning_table.add_column("Launch Warnings")
+                for item in warnings:
+                    warning_table.add_row(item)
+                self.console.print(warning_table)
+            return
+        lines = [
+            "Run Contract",
+            f"Package: {intake.package}",
+            f"Launch: {'headless' if non_interactive else 'interactive'}",
+            f"Scope: {intake.authorized_scope}",
+            f"Operator: {intake.operator_name}",
+            f"Report: {report_mode}",
+        ]
+        for item in warnings:
+            lines.append(f"Warning: {item}")
+        self._print("\n".join(lines), style="white")
+
+    def print_module_activation_plan(self, plan: list[dict[str, str]]) -> None:
+        if not plan:
+            return
+        if self.console and Table:
+            table = Table(title="Module Activation Plan", header_style="bold bright_green")
+            table.add_column("Module")
+            table.add_column("State")
+            table.add_column("Reason")
+            for item in plan:
+                table.add_row(
+                    str(item.get("module_name", "")),
+                    str(item.get("activation", "")),
+                    str(item.get("reason", "")),
+                )
+            self.console.print(table)
+            return
+        lines = ["Module Activation Plan"]
+        for item in plan:
+            lines.append(
+                f"- {item.get('module_name')}: {item.get('activation')} ({item.get('reason')})"
+            )
+        self._print("\n".join(lines), style="white")
 
     def info(self, message: str) -> None:
         self._print(message, style="cyan")
@@ -97,6 +238,23 @@ class ConsoleUi:
         self._print(message, style="green")
 
     def print_result(self, result: AssessmentResult) -> None:
+        if self.console and Table and Panel:
+            table = Table(show_header=False, box=None)
+            table.add_column("Key", style="bold bright_cyan")
+            table.add_column("Value", style="white")
+            table.add_row("Version", result.app_version)
+            table.add_row("Package", result.package)
+            table.add_row("Session", result.session_id)
+            table.add_row("Findings", str(result.findings_count))
+            table.add_row("PDF report", str(result.report_pdf))
+            table.add_row("CSV action plan", str(result.action_csv))
+            table.add_row("JSON findings", str(result.findings_json))
+            table.add_row("Encrypted bundle", str(result.encrypted_bundle))
+            table.add_row("Callback", result.callback_status)
+            for artifact in result.additional_artifacts:
+                table.add_row("Additional artifact", str(artifact))
+            self.console.print(Panel(table, title="Assessment Output", border_style="bright_green"))
+            return
         lines = [
             f"Version: {result.app_version}",
             f"Session: {result.session_id}",
@@ -112,6 +270,23 @@ class ConsoleUi:
         self._print("\n".join(lines), style="white")
 
     def print_preflight(self, report: PreflightReport, compact: bool = False) -> None:
+        if self.console and Table and Panel:
+            table = Table(
+                title="Preflight Validation" if not compact else "Healthcheck",
+                header_style="bold bright_cyan",
+            )
+            table.add_column("Check")
+            table.add_column("Status")
+            table.add_column("Detail")
+            table.add_row("overall", report.overall_status, "startup validation summary")
+            table.add_row("config_path", "ok", str(report.config_path or "defaults"))
+            table.add_row("data_dir", "ok", str(report.data_dir))
+            table.add_row("log_dir", "ok", str(report.log_dir))
+            if not compact:
+                for check in report.checks:
+                    table.add_row(check.name, check.status, check.detail)
+            self.console.print(Panel(table, border_style="bright_cyan"))
+            return
         lines = [
             f"Preflight: {report.overall_status}",
             f"Config path: {report.config_path or 'defaults'}",
@@ -127,6 +302,27 @@ class ConsoleUi:
         if not items:
             self._print(f"{title}: empty", style="white")
             return
+        if self.console and Table:
+            table = Table(title=title, header_style="bold bright_green")
+            table.add_column("Status")
+            table.add_column("Delivery")
+            table.add_column("Provider")
+            table.add_column("Session")
+            table.add_column("Attempts")
+            table.add_column("Next Attempt")
+            table.add_column("Reason")
+            for item in items:
+                table.add_row(
+                    str(item.get("status", "")),
+                    str(item.get("delivery_type", "")),
+                    str(item.get("provider", "")),
+                    str(item.get("session_id", "")),
+                    str(item.get("attempts", "")),
+                    str(item.get("next_attempt_at", "")),
+                    str(item.get("last_error", "")),
+                )
+            self.console.print(table)
+            return
         lines = [title]
         for item in items:
             lines.append(
@@ -138,18 +334,137 @@ class ConsoleUi:
 
     def _ask(self, prompt: str, default: str | None = None) -> str:
         if self.console and Prompt:
-            return Prompt.ask(prompt, default=default)
-        value = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
-        return value or (default or "")
+            value = normalize_prompt_value(Prompt.ask(prompt, default=default))
+        else:
+            value = normalize_prompt_value(input(f"{prompt}{f' [{default}]' if default else ''}: "))
+        return value or normalize_prompt_value(default)
 
     def _confirm(self, prompt: str, default: bool = False) -> bool:
         if self.console and Confirm:
-            return Confirm.ask(prompt, default=default)
+            value = Confirm.ask(prompt, default=default)
+            return default if value is None else bool(value)
         suffix = "Y/n" if default else "y/N"
-        value = input(f"{prompt} [{suffix}]: ").strip().lower()
-        if not value:
-            return default
-        return value in {"y", "yes", "true", "1"}
+        while True:
+            value = normalize_prompt_value(input(f"{prompt} [{suffix}]: ")).lower()
+            if not value:
+                return default
+            if value in YES_VALUES:
+                return True
+            if value in NO_VALUES:
+                return False
+            self.error(f"{prompt} expects yes or no.")
+
+    def _ask_required(self, prompt: str) -> str:
+        while True:
+            value = self._ask(prompt)
+            if value:
+                return value
+            self.error(f"{prompt} cannot be blank.")
+
+    def _ask_package(self) -> str:
+        while True:
+            package = self._ask(
+                "Assessment package [basic/standard/advanced]",
+                default="basic",
+            ).lower()
+            if package in VALID_PACKAGES:
+                return package
+            self.error("Assessment package must be one of: basic, standard, advanced.")
+
+    def _ask_scope(self) -> str:
+        while True:
+            scope = self._ask("Authorized scope/subnet")
+            if not scope:
+                self.error("Authorized scope/subnet cannot be blank.")
+                continue
+            if scope.lower() == "config":
+                return scope
+            try:
+                ScopePolicy.parse(scope)
+            except ValueError as exc:
+                self.error(str(exc))
+                continue
+            return scope
+
+    def _ask_host_list(self, prompt: str) -> list[str]:
+        while True:
+            value = self._ask(prompt, default="")
+            entries = _split_csv(value)
+            error = _validate_host_list(entries)
+            if error:
+                self.error(error)
+                continue
+            return entries
+
+    def _ask_domain_like(self, prompt: str, *, field_name: str, allow_blank: bool) -> str:
+        while True:
+            value = self._ask(prompt, default="" if allow_blank else None)
+            error = _validate_domain_like(value, field_name=field_name, allow_blank=allow_blank)
+            if error:
+                self.error(error)
+                continue
+            return value
+
+    def _ask_business_unit(self, prompt: str) -> str:
+        while True:
+            value = self._ask(prompt, default="")
+            error = _validate_business_unit(value)
+            if error:
+                self.error(error)
+                continue
+            return value
+
+    def _resolve_host_list(
+        self,
+        current: list[str],
+        *,
+        prompt: str,
+        prompt_optional: bool,
+    ) -> list[str]:
+        error = _validate_host_list(current)
+        if error and not prompt_optional:
+            self.error(error)
+            return []
+        if error:
+            return self._ask_host_list(prompt)
+        if current or not prompt_optional:
+            return current
+        return self._ask_host_list(prompt)
+
+    def _resolve_domain_value(
+        self,
+        current: str,
+        *,
+        prompt: str,
+        field_name: str,
+        prompt_optional: bool,
+    ) -> str:
+        error = _validate_domain_like(current, field_name=field_name, allow_blank=True)
+        if error and not prompt_optional:
+            self.error(error)
+            return ""
+        if error:
+            return self._ask_domain_like(prompt, field_name=field_name, allow_blank=True)
+        if current or not prompt_optional:
+            return current
+        return self._ask_domain_like(prompt, field_name=field_name, allow_blank=True)
+
+    def _resolve_business_unit(
+        self,
+        current: str,
+        *,
+        prompt: str,
+        prompt_optional: bool,
+    ) -> str:
+        error = _validate_business_unit(current)
+        if error and not prompt_optional:
+            self.error(error)
+            return ""
+        if error:
+            return self._ask_business_unit(prompt)
+        if current or not prompt_optional:
+            return current
+        return self._ask_business_unit(prompt)
 
     def _print(self, message: str, style: str = "white") -> None:
         if self.console:
@@ -158,5 +473,124 @@ class ConsoleUi:
             print(message)
 
 
-def _split_csv(value: str) -> list[str]:
-    return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
+def _split_csv(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = value.replace(";", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = [normalize_prompt_value(item) for item in value]
+    else:
+        items = normalize_prompt_value(value).replace(";", ",").split(",")
+    return [item.strip() for item in items if item.strip()]
+
+
+def _validate_host_list(entries: list[str]) -> str | None:
+    for entry in entries:
+        if not _is_valid_host_entry(entry):
+            return (
+                f"Invalid host entry '{entry}'. Expected IP address, hostname, or FQDN. "
+                "Put CIDR ranges in Authorized scope/subnet."
+            )
+    return None
+
+
+def _is_valid_host_entry(value: str) -> bool:
+    candidate = normalize_prompt_value(value).rstrip(".")
+    if not candidate:
+        return False
+    if candidate.lower() in RESERVED_HOST_TOKENS:
+        return False
+    if candidate.lower() in {"localhost", *LOCAL_ONLY_MARKERS}:
+        return True
+    if "/" in candidate:
+        return False
+    try:
+        ipaddress.ip_address(candidate)
+        return True
+    except ValueError:
+        return _is_hostname(candidate)
+
+
+def _validate_domain_like(value: str, *, field_name: str, allow_blank: bool) -> str | None:
+    candidate = normalize_prompt_value(value)
+    if not candidate:
+        return None if allow_blank else f"{field_name} cannot be blank."
+    if _is_hostname(candidate):
+        return None
+    return f"{field_name} must be a domain name like example.com or corp.local."
+
+
+def _validate_business_unit(value: str) -> str | None:
+    candidate = normalize_prompt_value(value)
+    if "\x00" in candidate:
+        return "Business unit contains invalid control characters."
+    return None
+
+
+def _is_hostname(value: str) -> bool:
+    candidate = normalize_prompt_value(value).rstrip(".")
+    if not candidate or ".." in candidate or len(candidate) > 253:
+        return False
+    labels = candidate.split(".")
+    return all(DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels)
+
+
+def _blank_intake() -> AssessmentIntake:
+    return AssessmentIntake(
+        client_name="",
+        site="",
+        operator_name="",
+        package="",
+        authorized_scope="",
+        scope_notes="",
+        consent_confirmed=False,
+        domain=None,
+        m365_connector=False,
+        host_allowlist=[],
+        host_denylist=[],
+        ad_domain=None,
+        business_unit="",
+        scope_labels={},
+        scanner_sources=[],
+        cloud_tenants=[],
+    )
+
+
+def _normalize_intake_seed(seed: AssessmentIntake) -> AssessmentIntake:
+    return AssessmentIntake(
+        client_name=normalize_prompt_value(seed.client_name),
+        site=normalize_prompt_value(seed.site),
+        operator_name=normalize_prompt_value(seed.operator_name),
+        package=normalize_prompt_value(seed.package).lower(),
+        authorized_scope=normalize_prompt_value(seed.authorized_scope),
+        scope_notes=normalize_prompt_value(seed.scope_notes),
+        consent_confirmed=bool(seed.consent_confirmed),
+        domain=normalize_prompt_value(seed.domain) or None,
+        m365_connector=bool(seed.m365_connector),
+        host_allowlist=_split_csv(seed.host_allowlist),
+        host_denylist=_split_csv(seed.host_denylist),
+        ad_domain=normalize_prompt_value(seed.ad_domain) or None,
+        business_unit=normalize_prompt_value(seed.business_unit),
+        scope_labels=dict(seed.scope_labels),
+        scanner_sources=[normalize_prompt_value(item) for item in seed.scanner_sources if normalize_prompt_value(item)],
+        cloud_tenants=[normalize_prompt_value(item) for item in seed.cloud_tenants if normalize_prompt_value(item)],
+    )
+
+
+def _validated_package(value: str) -> str:
+    package = normalize_prompt_value(value).lower()
+    return package if package in VALID_PACKAGES else ""
+
+
+def _validated_scope(value: str) -> str:
+    scope = normalize_prompt_value(value)
+    if not scope:
+        return ""
+    if scope.lower() == "config":
+        return scope
+    try:
+        ScopePolicy.parse(scope)
+    except ValueError:
+        return ""
+    return scope

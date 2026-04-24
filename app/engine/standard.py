@@ -36,6 +36,7 @@ class StandardPackageRunner:
     config: AppConfig
     session: AssessmentSession
     ui: ConsoleUi
+    report_mode: str = "standard"
 
     def run(self) -> AssessmentResult:
         context = collect_evidence_context(self.session)
@@ -69,8 +70,8 @@ class StandardPackageRunner:
             ScannerImportModule(self.session, self.config),
             FirewallVpnImportModule(self.session, self.config),
             BackupPlatformImportModule(self.session, self.config),
-            EstateAssessmentModule(self.session, self.config, package="standard"),
             ActiveDirectoryModule(self.session, self.config),
+            EstateAssessmentModule(self.session, self.config, package="standard"),
             BackupReadinessModule(self.session, context.windows_evidence),
             PrivilegedAccessModule(self.session, context.windows_evidence),
             IncidentReadinessModule(self.session, context.windows_evidence),
@@ -79,12 +80,15 @@ class StandardPackageRunner:
                 warn_threshold=self.config.standard.ransomware_score_warn_threshold,
             ),
         ]
+        activation_plan = _standard_activation_plan(self.session, self.config)
+        self.session.database.set_metadata("module_activation_plan", activation_plan)
+        self.ui.print_module_activation_plan(activation_plan)
         run_modules(config=self.config, session=self.session, ui=self.ui, modules=modules)
         return finalize_assessment(
             config=self.config,
             session=self.session,
             package="standard",
-            report_mode="standard",
+            report_mode=self.report_mode or "standard",
             include_roadmap=True,
         )
 
@@ -108,6 +112,7 @@ class ScannerImportModule:
         details: list[str] = []
         statuses: list[str] = []
         sources: list[dict[str, str]] = []
+        inventory = AssetInventory(self.session, self.config)
 
         for path_value, adapter, source_name in [
             (
@@ -129,6 +134,11 @@ class ScannerImportModule:
             if result.raw_evidence_path:
                 evidence_files.append(result.raw_evidence_path)
                 sources.append({"source": source_name, "path": str(result.raw_evidence_path)})
+            _record_scanner_assets(
+                inventory=inventory,
+                findings=result.findings,
+                evidence_path=str(result.raw_evidence_path) if result.raw_evidence_path else "",
+            )
             details.append(f"{result.scanner_name}: {result.detail}")
 
         for result, source_name in [
@@ -151,6 +161,11 @@ class ScannerImportModule:
             if result.raw_evidence_path:
                 evidence_files.append(result.raw_evidence_path)
                 sources.append({"source": source_name, "path": str(result.raw_evidence_path)})
+            _record_scanner_assets(
+                inventory=inventory,
+                findings=result.findings,
+                evidence_path=str(result.raw_evidence_path) if result.raw_evidence_path else "",
+            )
             details.append(f"{result.scanner_name}: {result.detail}")
 
         if not details:
@@ -180,3 +195,145 @@ def _aggregate_scanner_status(statuses: list[str]) -> str:
     if all(status == "skipped" for status in statuses):
         return "skipped"
     return "partial"
+
+
+def _record_scanner_assets(
+    *,
+    inventory: AssetInventory,
+    findings: list,
+    evidence_path: str,
+) -> None:
+    for finding in findings:
+        target = str(getattr(finding, "asset", "")).strip()
+        if not target:
+            continue
+        is_ip = _looks_like_ip(target)
+        record = inventory.record_imported_asset(
+            hostname="" if is_ip else target,
+            ip_address=target if is_ip else "",
+            source="scanner_import",
+        )
+        if evidence_path:
+            inventory.attach_evidence(record.asset_id, evidence_path, "scanner_imports")
+        inventory.session.database.upsert_asset_module_status(
+            record.asset_id,
+            "scanner_imports",
+            "complete",
+            "Asset identified from imported scanner evidence.",
+        )
+
+
+def _looks_like_ip(value: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _standard_activation_plan(session: AssessmentSession, config: AppConfig) -> list[dict[str, str]]:
+    return [
+        {
+            "module_name": "identity",
+            "activation": "active",
+            "reason": "Core local host evidence is always collected for Standard.",
+        },
+        {
+            "module_name": "endpoint",
+            "activation": "active",
+            "reason": "Core local host evidence is always collected for Standard.",
+        },
+        {
+            "module_name": "network_lite",
+            "activation": "active",
+            "reason": "Local exposure checks support host baseline and remote exposure correlation.",
+        },
+        {
+            "module_name": "email_security",
+            "activation": "active" if session.intake.domain else "not_configured",
+            "reason": "Client email domain provided." if session.intake.domain else "No client email domain configured.",
+        },
+        {
+            "module_name": "m365_entra",
+            "activation": "active" if config.m365_entra.enabled or config.m365_entra.evidence_json_path else "not_configured",
+            "reason": (
+                "M365/Entra evidence is configured."
+                if config.m365_entra.enabled or config.m365_entra.evidence_json_path
+                else "No M365/Entra connector or import configured."
+            ),
+        },
+        {
+            "module_name": "scanner_imports",
+            "activation": "active" if _scanner_sources_present(config) else "not_configured",
+            "reason": (
+                "Scanner imports or APIs are configured."
+                if _scanner_sources_present(config)
+                else "No Nessus or Greenbone import/API source configured."
+            ),
+        },
+        {
+            "module_name": "firewall_vpn_import",
+            "activation": "active" if config.firewall_vpn_import.import_paths else "not_configured",
+            "reason": (
+                "Firewall/VPN import paths configured."
+                if config.firewall_vpn_import.import_paths
+                else "No firewall/VPN import paths configured."
+            ),
+        },
+        {
+            "module_name": "backup_platform_import",
+            "activation": "active" if config.backup_platform_import.import_paths else "not_configured",
+            "reason": (
+                "Backup platform import paths configured."
+                if config.backup_platform_import.import_paths
+                else "No backup platform import paths configured."
+            ),
+        },
+        {
+            "module_name": "active_directory",
+            "activation": "active" if config.active_directory.enabled else "not_configured",
+            "reason": (
+                "Active Directory evidence is enabled."
+                if config.active_directory.enabled
+                else "AD evidence disabled in config."
+            ),
+        },
+        {
+            "module_name": "estate_orchestration",
+            "activation": "active",
+            "reason": "Standard defaults to company-wide discovery and collection inside approved scope.",
+        },
+        {
+            "module_name": "backup_readiness",
+            "activation": "active",
+            "reason": "Backup readiness combines endpoint, import, and questionnaire evidence.",
+        },
+        {
+            "module_name": "privileged_access",
+            "activation": "active",
+            "reason": "Privileged access review correlates local, directory, and governance evidence.",
+        },
+        {
+            "module_name": "incident_readiness",
+            "activation": "active",
+            "reason": "Incident readiness remains part of Standard reporting.",
+        },
+        {
+            "module_name": "ransomware_readiness",
+            "activation": "active",
+            "reason": "Ransomware readiness is derived from collected estate evidence.",
+        },
+    ]
+
+
+def _scanner_sources_present(config: AppConfig) -> bool:
+    return any(
+        [
+            config.scanner_integrations.nessus_import_path,
+            config.scanner_integrations.greenbone_import_path,
+            config.scanner_integrations.nessus_api.enabled,
+            config.scanner_integrations.greenbone_api.enabled,
+        ]
+    )

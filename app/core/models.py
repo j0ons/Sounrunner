@@ -44,6 +44,9 @@ class Finding:
     evidence_collected_at: str = ""
     raw_evidence_path: str = ""
     finding_basis: FindingBasis = "inferred_partial"
+    correlation_key: str = ""
+    merged_finding_ids: list[str] = field(default_factory=list)
+    merged_evidence_sources: list[str] = field(default_factory=list)
     asset_role: str = ""
     asset_criticality: str = ""
     asset_classification_source: str = ""

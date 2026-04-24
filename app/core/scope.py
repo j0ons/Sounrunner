@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from app.core.input_normalization import normalize_prompt_value
+
 
 LOCAL_ONLY_MARKERS = {"local", "localhost", "local-host-only", "host-only"}
 
@@ -33,7 +35,7 @@ class ScopePolicy:
         business_unit: str = "",
         scope_labels: dict[str, str] | None = None,
     ) -> "ScopePolicy":
-        cleaned = raw_scope.strip()
+        cleaned = normalize_prompt_value(raw_scope)
         if not cleaned:
             raise ValueError("Authorized scope is mandatory.")
 
@@ -48,8 +50,8 @@ class ScopePolicy:
                 local_only=True,
                 host_allowlist=allowlist,
                 host_denylist=denylist,
-                ad_domain=ad_domain.strip(),
-                business_unit=business_unit.strip(),
+                ad_domain=normalize_prompt_value(ad_domain),
+                business_unit=normalize_prompt_value(business_unit),
                 scope_labels=labels,
             )
 
@@ -70,8 +72,8 @@ class ScopePolicy:
             local_only=False,
             host_allowlist=allowlist,
             host_denylist=denylist,
-            ad_domain=ad_domain.strip(),
-            business_unit=business_unit.strip(),
+            ad_domain=normalize_prompt_value(ad_domain),
+            business_unit=normalize_prompt_value(business_unit),
             scope_labels=labels,
         )
 

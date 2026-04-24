@@ -4,12 +4,18 @@ read_only: true
 log_level: "INFO"
 report_company_name: "Soun Al Hosn Cybersecurity LLC"
 assessment:
+  client_name: ""
+  site: ""
+  operator_name: ""
+  package: ""
+  consent_confirmed: false
   approved_scope: ""
   approved_scopes: []
   host_allowlist: []
   host_denylist: []
   ad_domain: ""
   business_unit: ""
+  scope_notes: "No additional notes."
   scope_labels: {}
   cloud_tenants: []
   scanner_sources: []

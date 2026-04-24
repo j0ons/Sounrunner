@@ -10,6 +10,7 @@ Implemented:
 
 - Rich terminal launcher with version reporting.
 - Startup preflight and healthcheck validation.
+- Config-first launch flow with headless company-wide execution support.
 - Session creation with consent and scope enforcement.
 - External runtime paths using `--config`, `--data-dir`, and `--log-dir`.
 - Encrypted local workspace primitives for evidence, checkpoints, and sensitive session blobs.
@@ -30,6 +31,8 @@ Implemented:
 - Multi-host asset inventory, per-host collection status tracking, and organization coverage summaries for Standard/Advanced.
 - Company-wide discovery-to-collection orchestration with worker concurrency and per-host isolation.
 - Remote Windows collection foundation over legitimate PowerShell remoting / WinRM patterns when operator credentials and scope allow it.
+- Automatic module activation planning with explicit active/not-configured reasons.
+- Finding correlation and deduplication for common estate issues such as RDP, SMB, backup, and privileged-access overlaps.
 - PDF report, CSV action plan, JSON findings archive, and AES-encrypted ZIP result bundle.
 - Optional sanitized SMTP summary plus queued callback retry for SMTP, HTTPS, S3-compatible storage, and SFTP.
 - GitHub Actions Windows EXE build and ZIP packaging.
@@ -78,7 +81,22 @@ C:\SounRunner\run_assessment.ps1 -Preflight
 C:\SounRunner\run_assessment.ps1
 ```
 
-For company-wide Standard or Advanced runs, define the approved CIDRs, optional allowlist/denylist, and remote collection settings in config before launch.
+For company-wide Standard or Advanced runs, the low-friction path is now headless and config-first. If config already defines client, site, operator, package, consent, and approved scopes, the runner does not ask again.
+
+One-command Standard example:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
+  --config C:\SounRunner\config\config.yaml `
+  --data-dir C:\SounRunner\data `
+  --log-dir C:\SounRunner\logs `
+  --package standard `
+  --scope-from-config `
+  --non-interactive `
+  --report-mode standard
+```
+
+If a required value is missing in headless mode, the runner fails cleanly instead of falling back into fragile prompt chains.
 
 4. If callbacks were enabled and any delivery failed, inspect and retry the queue.
 
@@ -138,11 +156,18 @@ Basic remains a local, small-scope package. Standard and Advanced now support co
 
 How it works:
 
-1. Nmap discovery runs only inside approved CIDRs.
-2. The runner creates or updates a central asset inventory.
-3. Discovery-only assets are recorded even if no remote collection is possible.
-4. Remote Windows collection attempts authorized read-only evidence gathering per eligible host.
-5. Host findings and repeated control gaps are aggregated into organization-level summaries.
+1. Approved scopes from config become the discovery boundary.
+2. The runner builds a central asset inventory from every configured truth source it can use safely:
+   - approved-scope Nmap discovery
+   - Active Directory computer objects
+   - imported scanner evidence
+   - imported firewall/VPN evidence
+   - imported backup platform evidence
+   - configured cloud evidence
+3. Asset records are enriched with hostname/FQDN, site, business unit, role, criticality, and evidence lineage.
+4. The orchestrator plans remote Windows collection automatically for eligible in-scope hosts.
+5. Discovery-only, imported-only, partial, unreachable, and fully assessed states are preserved honestly.
+6. Estate-level coverage and repeated control issues are generated automatically in Standard and Advanced.
 
 Discovery-only vs fully assessed:
 
@@ -154,6 +179,74 @@ Discovery-only vs fully assessed:
 This matters because a discovered RDP or SMB service is not the same thing as a completed host posture assessment. The reports now separate those cases.
 
 Advisory and partial items are not confirmed technical vulnerabilities. Reports separate them from direct system and network discovery findings.
+
+## Config-First And Headless Execution
+
+Basic can still be launched interactively. Standard and Advanced are now designed to run headless for real company assessments.
+
+Supported launch overrides:
+
+- `--package basic|standard|advanced`
+- `--non-interactive`
+- `--client-name`
+- `--site`
+- `--operator`
+- `--scope-from-config`
+- `--report-mode`
+- existing `--preflight`, `--healthcheck`, `--show-queue`, and `--retry-callbacks`
+
+Behavior:
+
+- If config already contains approved scopes, client name, site, operator, package, and consent, the runner uses them directly.
+- Interactive prompting is now reserved for missing required values only.
+- Optional fields do not force extra prompts during company-wide runs.
+- If Standard or Advanced is launched with `local-host-only`, the runner warns that estate coverage is limited.
+
+Example headless Advanced launch:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
+  --config C:\SounRunner\config\config.yaml `
+  --data-dir C:\SounRunner\data `
+  --log-dir C:\SounRunner\logs `
+  --package advanced `
+  --scope-from-config `
+  --non-interactive `
+  --report-mode advanced
+```
+
+## Automatic Module Activation
+
+Standard and Advanced no longer behave like fixed prompt-driven scripts. They activate modules from config and evidence availability.
+
+Examples:
+
+- If `active_directory.enabled: true`, AD evidence is attempted and inventory is enriched from directory data.
+- If `remote_windows.enabled: true`, the orchestrator automatically plans approved in-scope WinRM collection.
+- If firewall/VPN or backup import paths exist, those imports are ingested automatically.
+- If a client domain exists, DNS/email posture checks run.
+- If M365 / Entra config is present, the cloud evidence connector runs.
+- If Nessus or Greenbone imports/API are configured, scanner evidence is ingested.
+
+Activation decisions are written into metadata and surfaced in the run output. Missing connectors are marked `not_configured`, `skipped`, or `partial`. They are not silently ignored.
+
+## Finding Correlation And Deduplication
+
+Standard and Advanced now correlate common duplicate issues before final reporting.
+
+Examples:
+
+- direct host RDP evidence + Nmap RDP exposure
+- direct host SMB evidence + Nmap SMB exposure
+- local/admin governance findings on the same host
+- backup platform evidence + backup readiness findings on the same asset
+
+What changes:
+
+- original evidence paths are preserved
+- merged findings retain source-aware evidence lineage
+- reports and JSON outputs use the consolidated finding instead of dumping obvious duplicates side by side
+- estate-level repeated findings are generated from the correlated set, not the noisy raw set
 
 ## Nmap On Windows
 
@@ -292,6 +385,21 @@ email_security:
 If DKIM selectors are unknown, leave the list empty. The report will state that DKIM was not assessed instead of pretending DKIM failed.
 
 During intake, enter the exact authorized scope string or enter `config` to use `approved_scopes` from the config file. The tool rejects empty or invalid scope and does not scan outside approved CIDR ranges.
+
+Headless company-wide configs should now populate launch defaults directly:
+
+```yaml
+assessment:
+  client_name: "Example Client"
+  site: "HQ"
+  operator_name: "Assessment Operator"
+  package: "standard"
+  consent_confirmed: true
+  scope_notes: "Authorized estate assessment."
+  approved_scopes:
+    - "192.168.10.0/24"
+    - "192.168.20.0/24"
+```
 
 ## Active Directory Evidence
 
@@ -435,9 +543,10 @@ Standard is now implemented as a real package path. It reuses Basic evidence-bac
 Standard runs:
 
 - Basic local Windows posture, DNS/email posture, and approved-scope Nmap exposure checks.
-- Multi-host discovery across one or more approved CIDRs.
+- Multi-host discovery across one or more approved CIDRs by default.
 - Central asset inventory with discovery-only, partial, assessed, and unreachable host states.
-- Remote Windows posture collection across eligible discovered hosts using authorized WinRM/PowerShell remoting.
+- Automatic target planning from discovery, AD, and imported evidence sources.
+- Remote Windows posture collection across eligible in-scope hosts using authorized WinRM/PowerShell remoting.
 - Repeated-control aggregation such as the same control gap appearing across many endpoints.
 - Backup readiness review.
 - Ransomware readiness scoring.
@@ -458,22 +567,13 @@ Standard is honest about evidence quality:
 Run Standard on Windows:
 
 ```powershell
-C:\SounRunner\run_assessment.ps1
-```
-
-At the package prompt, enter:
-
-```text
-standard
-```
-
-Or launch the EXE directly:
-
-```powershell
 C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --config C:\SounRunner\config\config.yaml `
   --data-dir C:\SounRunner\data `
-  --log-dir C:\SounRunner\logs
+  --log-dir C:\SounRunner\logs `
+  --package standard `
+  --scope-from-config `
+  --non-interactive
 ```
 
 Standard outputs include:
@@ -511,13 +611,13 @@ Advanced reuses the same company-wide inventory and remote collection model as S
 Run Advanced on Windows:
 
 ```powershell
-C:\SounRunner\run_assessment.ps1
-```
-
-At the package prompt, enter:
-
-```text
-advanced
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
+  --config C:\SounRunner\config\config.yaml `
+  --data-dir C:\SounRunner\data `
+  --log-dir C:\SounRunner\logs `
+  --package advanced `
+  --scope-from-config `
+  --non-interactive
 ```
 
 Advanced outputs include all Standard outputs plus:

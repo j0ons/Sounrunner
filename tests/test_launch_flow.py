@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from app.core.config import AppConfig
+from app.core.session import AssessmentIntake
+from app.ui.console import ConsoleUi
+from main import _launch_warnings, _resolve_intake, build_parser
+
+
+class DummyUi:
+    def __init__(self, result: AssessmentIntake | None = None) -> None:
+        self.called = False
+        self.seed: AssessmentIntake | None = None
+        self.result = result
+
+    def complete_intake(self, seed: AssessmentIntake, *, prompt_optional: bool = False) -> AssessmentIntake:
+        self.called = True
+        self.seed = seed
+        assert prompt_optional is False
+        if self.result is not None:
+            return self.result
+        return seed
+
+
+def test_non_interactive_config_first_launch_uses_config_without_prompt(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+read_only: true
+assessment:
+  client_name: "Contoso"
+  site: "HQ"
+  operator_name: "Operator"
+  package: "standard"
+  consent_confirmed: true
+  approved_scopes:
+    - "10.0.0.0/24"
+""",
+        encoding="utf-8",
+    )
+    config = AppConfig.load(config_file)
+    args = build_parser().parse_args(["--config", str(config_file), "--non-interactive", "--scope-from-config"])
+    ui = DummyUi()
+
+    intake = _resolve_intake(args=args, config=config, ui=ui)  # type: ignore[arg-type]
+
+    assert ui.called is False
+    assert intake.client_name == "Contoso"
+    assert intake.site == "HQ"
+    assert intake.operator_name == "Operator"
+    assert intake.package == "standard"
+    assert intake.authorized_scope == "10.0.0.0/24"
+    assert intake.consent_confirmed is True
+
+
+def test_interactive_launch_prompts_only_for_missing_required_values(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+read_only: true
+assessment:
+  client_name: "Contoso"
+  site: "HQ"
+  package: "advanced"
+  consent_confirmed: true
+  approved_scopes:
+    - "10.0.0.0/24"
+""",
+        encoding="utf-8",
+    )
+    config = AppConfig.load(config_file)
+    args = build_parser().parse_args(["--config", str(config_file)])
+    resolved = AssessmentIntake(
+        client_name="Contoso",
+        site="HQ",
+        operator_name="Analyst",
+        package="advanced",
+        authorized_scope="10.0.0.0/24",
+        scope_notes="No additional notes.",
+        consent_confirmed=True,
+    )
+    ui = DummyUi(result=resolved)
+
+    intake = _resolve_intake(args=args, config=config, ui=ui)  # type: ignore[arg-type]
+
+    assert ui.called is True
+    assert ui.seed is not None
+    assert ui.seed.client_name == "Contoso"
+    assert ui.seed.site == "HQ"
+    assert ui.seed.operator_name == ""
+    assert ui.seed.package == "advanced"
+    assert ui.seed.authorized_scope == "10.0.0.0/24"
+    assert intake.operator_name == "Analyst"
+
+
+def test_non_interactive_launch_fails_cleanly_on_missing_values(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("read_only: true\nassessment: {}\n", encoding="utf-8")
+    config = AppConfig.load(config_file)
+    args = build_parser().parse_args(["--config", str(config_file), "--non-interactive"])
+
+    with pytest.raises(ValueError, match="missing client_name"):
+        _resolve_intake(args=args, config=config, ui=DummyUi())  # type: ignore[arg-type]
+
+
+def test_launch_warnings_flag_limited_standard_scope() -> None:
+    config = AppConfig()
+    intake = AssessmentIntake(
+        client_name="Client",
+        site="HQ",
+        operator_name="Operator",
+        package="standard",
+        authorized_scope="local-host-only",
+        scope_notes="test",
+        consent_confirmed=True,
+    )
+
+    warnings = _launch_warnings(intake, config)
+
+    assert any("localhost-only scope" in item for item in warnings)
+    assert any("Remote Windows collection is not configured" in item for item in warnings)
+
+
+def test_visual_launch_summary_handles_non_rich_console(capsys) -> None:
+    ui = ConsoleUi(app_version="test")
+    ui.console = None
+    intake = AssessmentIntake(
+        client_name="Client",
+        site="HQ",
+        operator_name="Operator",
+        package="standard",
+        authorized_scope="10.0.0.0/24",
+        scope_notes="test",
+        consent_confirmed=True,
+    )
+
+    ui.print_launch_summary(intake, non_interactive=True, report_mode="standard", warnings=["limited"])
+
+    output = capsys.readouterr().out
+    assert "Run Contract" in output
+    assert "headless" in output
+    assert "limited" in output

@@ -13,6 +13,7 @@ from app import __version__
 from app.core.config import AppConfig
 from app.core.crypto import CryptoWorkspace
 from app.core.database import LocalDatabase
+from app.core.input_normalization import normalize_prompt_value
 from app.core.logger import configure_logger
 from app.core.scope import ScopePolicy
 from app.core.state import StateManager
@@ -199,6 +200,25 @@ class SessionManager:
     def _validate_intake(self, intake: AssessmentIntake) -> ScopePolicy:
         if not intake.consent_confirmed:
             raise ValueError("Consent/authorization confirmation is mandatory.")
+        intake.package = normalize_prompt_value(intake.package).lower()
+        intake.client_name = normalize_prompt_value(intake.client_name)
+        intake.site = normalize_prompt_value(intake.site)
+        intake.operator_name = normalize_prompt_value(intake.operator_name)
+        intake.authorized_scope = normalize_prompt_value(intake.authorized_scope)
+        intake.scope_notes = normalize_prompt_value(intake.scope_notes)
+        intake.business_unit = normalize_prompt_value(intake.business_unit)
+        intake.ad_domain = normalize_prompt_value(intake.ad_domain) or None
+        intake.domain = normalize_prompt_value(intake.domain) or None
+        intake.host_allowlist = [
+            normalize_prompt_value(item)
+            for item in intake.host_allowlist
+            if normalize_prompt_value(item)
+        ]
+        intake.host_denylist = [
+            normalize_prompt_value(item)
+            for item in intake.host_denylist
+            if normalize_prompt_value(item)
+        ]
         if intake.package not in {"basic", "standard", "advanced"}:
             raise ValueError(f"Unsupported package: {intake.package}")
         required = {
@@ -206,7 +226,7 @@ class SessionManager:
             "site": intake.site,
             "operator_name": intake.operator_name,
         }
-        missing = [name for name, value in required.items() if not value.strip()]
+        missing = [name for name, value in required.items() if not normalize_prompt_value(value)]
         if missing:
             raise ValueError(f"Missing required intake field(s): {', '.join(missing)}")
         return ScopePolicy.parse(

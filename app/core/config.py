@@ -181,12 +181,18 @@ class GreenboneApiConfig:
 class AssessmentDefaults:
     """Optional defaults operators may set in external config."""
 
+    client_name: str = ""
+    site: str = ""
+    operator_name: str = ""
+    package: str = ""
+    consent_confirmed: bool = False
     approved_scope: str = ""
     approved_scopes: list[str] = field(default_factory=list)
     host_allowlist: list[str] = field(default_factory=list)
     host_denylist: list[str] = field(default_factory=list)
     ad_domain: str = ""
     business_unit: str = ""
+    scope_notes: str = "No additional notes."
     scope_labels: dict[str, str] = field(default_factory=dict)
     cloud_tenants: list[str] = field(default_factory=list)
     scanner_sources: list[str] = field(default_factory=list)
@@ -480,6 +486,8 @@ class AppConfig:
             )
         if self.report.mode not in {"auto", "basic", "standard", "advanced"}:
             raise ValueError("report.mode must be auto, basic, standard, or advanced.")
+        if self.assessment.package and self.assessment.package not in {"basic", "standard", "advanced"}:
+            raise ValueError("assessment.package must be basic, standard, or advanced when set.")
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:

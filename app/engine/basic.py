@@ -23,6 +23,7 @@ class BasicPackageRunner:
     config: AppConfig
     session: AssessmentSession
     ui: ConsoleUi
+    report_mode: str = "basic"
 
     def run(self) -> AssessmentResult:
         context = collect_evidence_context(self.session)
@@ -54,5 +55,5 @@ class BasicPackageRunner:
             config=self.config,
             session=self.session,
             package="basic",
-            report_mode="basic",
+            report_mode=self.report_mode or "basic",
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from app.core.integrity import SessionAuditor
 from app.core.inventory import AssetInventory, AssetRecord
 from app.core.models import Finding, ModuleResult
 from app.core.session import AssessmentSession
-from app.engine.aggregation import estate_summary, generate_aggregate_findings
+from app.engine.aggregation import estate_summary
 from app.modules.endpoint import build_endpoint_findings
 from app.modules.identity import build_identity_findings
 from app.modules.network_lite import build_local_exposure_findings
@@ -51,6 +52,8 @@ class EstateAssessmentModule:
         evidence_files: list[Path] = []
         findings: list[Finding] = []
         details: list[str] = []
+        seed_records = inventory.list_assets()
+        details.append(f"Inventory seeds={len(seed_records)} from local, directory, and import evidence.")
 
         discovery_result = NmapAdapter(
             self.session,
@@ -59,22 +62,6 @@ class EstateAssessmentModule:
         ).scan(self.session.scope)
         if discovery_result.raw_evidence_path:
             evidence_files.append(discovery_result.raw_evidence_path)
-        if discovery_result.status == "failed":
-            self.session.database.set_metadata(
-                "estate_summary",
-                {
-                    "coverage": inventory.coverage_summary(),
-                    "top_repeated_findings": [],
-                    "discovery_status": discovery_result.status,
-                    "discovery_detail": discovery_result.detail,
-                },
-            )
-            return ModuleResult(
-                module_name=self.name,
-                status="partial",
-                detail=f"Discovery failed safely: {discovery_result.detail}",
-                evidence_files=evidence_files,
-            )
 
         eligible_assets = [
             asset
@@ -97,13 +84,14 @@ class EstateAssessmentModule:
                     str(discovery_result.raw_evidence_path),
                     "network_discovery",
                 )
-        findings.extend(
-            findings_from_nmap_assets(
-                eligible_assets,
-                discovery_result.raw_evidence_path or self.session.evidence_dir / "nmap_scan.xml.enc",
-                package=self.package,
+        if discovery_result.raw_evidence_path:
+            findings.extend(
+                findings_from_nmap_assets(
+                    eligible_assets,
+                    discovery_result.raw_evidence_path,
+                    package=self.package,
+                )
             )
-        )
         details.append(
             f"Discovery status={discovery_result.status}; discovered={len(discovery_result.assets)}; in_scope={len(eligible_assets)}."
         )
@@ -119,40 +107,32 @@ class EstateAssessmentModule:
             },
         )
 
+        planned_targets, planning_notes = self._plan_remote_targets(inventory)
+        details.extend(planning_notes)
         remote_outcomes: list[HostCollectionOutcome] = []
-        if self.config.remote_windows.enabled and eligible_assets:
+        if self.config.remote_windows.enabled and planned_targets:
             remote_outcomes = self._collect_remote_hosts(
                 inventory=inventory,
-                assets=eligible_assets,
-                records=discovered_records,
+                planned_targets=planned_targets,
             )
             for outcome in remote_outcomes:
                 findings.extend(outcome.findings)
                 evidence_files.extend(outcome.evidence_files)
                 details.append(f"{outcome.asset.display_name}: {outcome.status} - {outcome.detail}")
         else:
-            details.append("Remote Windows collection disabled or no discovered assets were eligible.")
-            for record in discovered_records:
-                inventory.mark_status(
-                    record.asset_id,
-                    assessment_status="discovery_only",
-                    collector_status="skipped",
-                    error_state="" if self.config.remote_windows.enabled else "remote_collection_disabled",
-                )
-                self.session.database.upsert_asset_module_status(
-                    record.asset_id,
-                    "remote_windows_collection",
-                    "skipped",
-                    "Remote collection disabled or no eligible remote collection configuration.",
-                )
+            details.append("Remote Windows collection disabled or no eligible estate targets were planned.")
+            self._mark_uncollected_targets(
+                inventory=inventory,
+                records=[record for _, record in planned_targets] if planned_targets else inventory.list_assets(),
+                reason=(
+                    "Remote collection disabled or no eligible remote collection configuration."
+                    if not self.config.remote_windows.enabled
+                    else "No eligible remote Windows targets were planned from approved evidence sources."
+                ),
+                error_state="" if self.config.remote_windows.enabled else "remote_collection_disabled",
+            )
 
         baseline_findings = self.session.database.list_findings()
-        aggregate_findings = generate_aggregate_findings(
-            findings=[*baseline_findings, *findings],
-            inventory=inventory,
-            package=self.package,
-        )
-        findings.extend(aggregate_findings)
         summary = estate_summary(
             inventory=inventory,
             findings=[*baseline_findings, *findings],
@@ -162,11 +142,23 @@ class EstateAssessmentModule:
             "inventory_assets",
             [record.to_db_payload() for record in inventory.list_assets()],
         )
-        status = _estate_status(discovery_result.status, remote_outcomes, discovered_records)
+        self.session.database.set_metadata(
+            "estate_discovery",
+            {
+                "seed_asset_count": len(seed_records),
+                "discovery_status": discovery_result.status,
+                "discovery_detail": discovery_result.detail,
+                "discovered_assets": len(discovery_result.assets),
+                "in_scope_assets": len(eligible_assets),
+                "planned_remote_targets": len(planned_targets),
+            },
+        )
+        status = _estate_status(discovery_result.status, remote_outcomes, inventory.list_assets())
         logger.info(
-            "Estate orchestration complete package=%s discovered=%s remote_outcomes=%s status=%s",
+            "Estate orchestration complete package=%s discovered=%s planned_targets=%s remote_outcomes=%s status=%s",
             self.package,
             len(discovered_records),
+            len(planned_targets),
             len(remote_outcomes),
             status,
         )
@@ -182,26 +174,22 @@ class EstateAssessmentModule:
         self,
         *,
         inventory: AssetInventory,
-        assets: list[NetworkAsset],
-        records: list[AssetRecord],
+        planned_targets: list[tuple[str, AssetRecord]],
     ) -> list[HostCollectionOutcome]:
         collector = RemoteWindowsCollector(self.session, self.config.remote_windows)
-        record_map = {record.ip_address: record for record in records if record.ip_address}
         outcomes: list[HostCollectionOutcome] = []
         with ThreadPoolExecutor(max_workers=self.config.orchestration.max_workers) as executor:
             futures = {
                 executor.submit(
                     self._collect_with_retry,
                     collector,
-                    asset.address,
-                    record_map.get(asset.address),
-                ): asset.address
-                for asset in assets
-                if record_map.get(asset.address)
+                    target,
+                    record,
+                ): (target, record)
+                for target, record in planned_targets
             }
             for future in as_completed(futures):
-                address = futures[future]
-                record = record_map[address]
+                target, record = futures[future]
                 try:
                     result = future.result()
                 except Exception as exc:  # noqa: BLE001 - isolate one host failure.
@@ -232,6 +220,111 @@ class EstateAssessmentModule:
                     continue
                 outcomes.append(self._normalize_host_result(result, record, inventory))
         return outcomes
+
+    def _plan_remote_targets(
+        self,
+        inventory: AssetInventory,
+    ) -> tuple[list[tuple[str, AssetRecord]], list[str]]:
+        records = inventory.list_assets()
+        planned: list[tuple[str, AssetRecord]] = []
+        notes: list[str] = []
+        seen_targets: set[str] = set()
+        skipped = 0
+        for record in records:
+            if not self._eligible_for_remote_collection(record):
+                continue
+            target = self._resolve_remote_target(record, inventory)
+            if not target:
+                skipped += 1
+                self.session.database.upsert_asset_module_status(
+                    record.asset_id,
+                    "remote_windows_collection",
+                    "skipped",
+                    "Asset could not be mapped to an approved in-scope WinRM target.",
+                )
+                continue
+            if target.lower() in seen_targets:
+                continue
+            seen_targets.add(target.lower())
+            planned.append((target, inventory.find_asset(record.asset_id) or record))
+        notes.append(
+            f"Remote collection planning considered {len(records)} inventory asset(s) and queued {len(planned)} target(s)."
+        )
+        if skipped:
+            notes.append(
+                f"{skipped} asset(s) remained discovery-only or imported-only because no approved in-scope WinRM target could be resolved."
+            )
+        return planned, notes
+
+    def _eligible_for_remote_collection(self, record: AssetRecord) -> bool:
+        if record.discovery_source == "local_environment_profile":
+            return False
+        if record.asset_role == "network_device":
+            return False
+        if record.collector_status == "complete" and record.assessment_status == "assessed":
+            return False
+        os_blob = f"{record.os_family} {record.os_guess}".lower()
+        if os_blob and "windows" not in os_blob and record.asset_role not in {
+            "server",
+            "workstation",
+            "domain_controller",
+            "unknown",
+        }:
+            return False
+        return True
+
+    def _resolve_remote_target(
+        self,
+        record: AssetRecord,
+        inventory: AssetInventory,
+    ) -> str:
+        aliases = [record.ip_address, record.fqdn, record.hostname]
+        for alias in aliases:
+            target = alias.strip()
+            if not target:
+                continue
+            if _looks_like_ip(target) and self.session.scope.allows_asset(target, [record.hostname, record.fqdn]):
+                return target
+        for alias in [record.fqdn, record.hostname]:
+            target = alias.strip()
+            if not target:
+                continue
+            resolved_ips = _resolve_host_ips(target)
+            for ip_value in resolved_ips:
+                if not self.session.scope.allows_asset(ip_value, [record.hostname, record.fqdn, target]):
+                    continue
+                if not record.ip_address:
+                    record.ip_address = ip_value
+                    record.subnet_label = record.subnet_label or self.session.scope.label_for_ip(ip_value)
+                    inventory.upsert(record)
+                return ip_value if self.config.remote_windows.require_discovery_match else target
+        return ""
+
+    def _mark_uncollected_targets(
+        self,
+        *,
+        inventory: AssetInventory,
+        records: list[AssetRecord],
+        reason: str,
+        error_state: str,
+    ) -> None:
+        for record in records:
+            if record.discovery_source == "local_environment_profile":
+                continue
+            if record.assessment_status == "assessed":
+                continue
+            inventory.mark_status(
+                record.asset_id,
+                assessment_status=record.assessment_status or "discovery_only",
+                collector_status="skipped",
+                error_state=error_state,
+            )
+            self.session.database.upsert_asset_module_status(
+                record.asset_id,
+                "remote_windows_collection",
+                "skipped",
+                reason,
+            )
 
     def _collect_with_retry(
         self,
@@ -431,12 +524,37 @@ def _normalize_remote_status(result: RemoteWindowsCollectionResult) -> dict[str,
 def _estate_status(
     discovery_status: str,
     outcomes: list[HostCollectionOutcome],
-    discovered_records: list[AssetRecord],
+    records: list[AssetRecord],
 ) -> str:
-    if discovery_status == "failed":
+    if discovery_status == "failed" and not records:
         return "failed"
-    if not discovered_records:
+    if not records:
+        return "partial"
+    if discovery_status == "failed":
         return "partial"
     if outcomes and all(item.status == "complete" for item in outcomes):
         return "complete"
     return "partial"
+
+
+def _resolve_host_ips(hostname: str) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return []
+    addresses = []
+    for info in infos:
+        address = str(info[4][0]).strip()
+        if address and address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def _looks_like_ip(value: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False

@@ -13,10 +13,12 @@ def test_standard_package_smoke_run(tmp_path: Path) -> None:
     session = SessionManager(config).create_session(_intake("standard"))
 
     result = StandardPackageRunner(config=config, session=session, ui=ConsoleUi()).run()
+    activation_plan = session.database.get_metadata("module_activation_plan", [])
 
     assert result.package == "standard"
     assert result.report_pdf.exists()
     assert result.additional_artifacts
+    assert any(item["module_name"] == "estate_orchestration" for item in activation_plan)
 
 
 def test_advanced_package_smoke_run(tmp_path: Path) -> None:
@@ -25,10 +27,12 @@ def test_advanced_package_smoke_run(tmp_path: Path) -> None:
     session = SessionManager(config).create_session(_intake("advanced"))
 
     result = AdvancedPackageRunner(config=config, session=session, ui=ConsoleUi()).run()
+    activation_plan = session.database.get_metadata("module_activation_plan", [])
 
     assert result.package == "advanced"
     assert result.report_pdf.exists()
     assert any("30_60_90" in artifact.name for artifact in result.additional_artifacts)
+    assert any(item["module_name"] == "advanced_guided" for item in activation_plan)
 
 
 def _intake(package: str) -> AssessmentIntake:

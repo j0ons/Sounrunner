@@ -11,7 +11,7 @@ from app.core.models import AssessmentResult
 from app.core.session import AssessmentSession
 from app.engine.common import collect_evidence_context, finalize_assessment, run_modules
 from app.engine.orchestrator import EstateAssessmentModule
-from app.engine.standard import ScannerImportModule
+from app.engine.standard import ScannerImportModule, _standard_activation_plan
 from app.modules.active_directory import ActiveDirectoryModule
 from app.modules.advanced_guided import AdvancedGuidedModule
 from app.modules.backup_readiness import BackupReadinessModule
@@ -33,6 +33,7 @@ class AdvancedPackageRunner:
     config: AppConfig
     session: AssessmentSession
     ui: ConsoleUi
+    report_mode: str = "advanced"
 
     def run(self) -> AssessmentResult:
         context = collect_evidence_context(self.session)
@@ -65,8 +66,8 @@ class AdvancedPackageRunner:
             ScannerImportModule(self.session, self.config),
             FirewallVpnImportModule(self.session, self.config),
             BackupPlatformImportModule(self.session, self.config),
-            EstateAssessmentModule(self.session, self.config, package="advanced"),
             ActiveDirectoryModule(self.session, self.config),
+            EstateAssessmentModule(self.session, self.config, package="advanced"),
             BackupReadinessModule(self.session, context.windows_evidence),
             PrivilegedAccessModule(self.session, context.windows_evidence),
             IncidentReadinessModule(self.session, context.windows_evidence),
@@ -76,12 +77,22 @@ class AdvancedPackageRunner:
             ),
             AdvancedGuidedModule(self.session),
         ]
+        activation_plan = [
+            *_standard_activation_plan(self.session, self.config),
+            {
+                "module_name": "advanced_guided",
+                "activation": "active",
+                "reason": "Advanced adds guided planning and full-assessment outputs on top of Standard evidence.",
+            },
+        ]
+        self.session.database.set_metadata("module_activation_plan", activation_plan)
+        self.ui.print_module_activation_plan(activation_plan)
         run_modules(config=self.config, session=self.session, ui=self.ui, modules=modules)
         return finalize_assessment(
             config=self.config,
             session=self.session,
             package="advanced",
-            report_mode="advanced",
+            report_mode=self.report_mode or "advanced",
             include_roadmap=True,
             include_30_60_90=self.config.advanced.generate_30_60_90_plan,
         )

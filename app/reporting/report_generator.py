@@ -283,6 +283,20 @@ class ReportGenerator:
                 story.append(Paragraph(asset_line, styles["Normal"]))
                 story.append(Paragraph(f"Evidence: {finding.evidence_summary}", styles["Normal"]))
                 story.append(Paragraph(f"Raw evidence: {finding.raw_evidence_path}", styles["Normal"]))
+                if finding.merged_evidence_sources:
+                    story.append(
+                        Paragraph(
+                            "Correlated sources: " + "; ".join(finding.merged_evidence_sources),
+                            styles["Normal"],
+                        )
+                    )
+                if finding.merged_finding_ids:
+                    story.append(
+                        Paragraph(
+                            "Merged finding IDs: " + ", ".join(finding.merged_finding_ids),
+                            styles["Normal"],
+                        )
+                    )
                 story.append(Paragraph(f"Why it matters: {finding.why_it_matters}", styles["Normal"]))
                 story.append(Paragraph(f"Business impact: {finding.likely_business_impact}", styles["Normal"]))
                 story.append(Paragraph("Remediation: " + "; ".join(finding.remediation_steps), styles["Normal"]))
@@ -303,6 +317,21 @@ class ReportGenerator:
         story.append(Paragraph(f"Import sources used: {appendix['import_sources']}", styles["Normal"]))
         story.append(Paragraph(f"Callback/export status: {appendix['callback_summary']}", styles["Normal"]))
         story.append(Paragraph(f"Evidence manifest entries: {appendix['manifest_entry_count']}", styles["Normal"]))
+        story.append(Paragraph(f"Finding correlation: {appendix['correlation_summary']}", styles["Normal"]))
+        if appendix["activation_plan"]:
+            activation_rows = [["Module", "Activation", "Reason"]]
+            for entry in appendix["activation_plan"]:
+                activation_rows.append(
+                    [
+                        str(entry.get("module_name", "")),
+                        str(entry.get("activation", "")),
+                        str(entry.get("reason", "")),
+                    ]
+                )
+            activation_table = Table(activation_rows, repeatRows=1)
+            activation_table.setStyle(_table_style("#0F766E"))
+            story.append(activation_table)
+            story.append(Spacer(1, 8))
         if appendix["manifest_entries"]:
             manifest_rows = [["File", "Module", "SHA-256"]]
             for entry in appendix["manifest_entries"]:
@@ -351,6 +380,9 @@ class ReportGenerator:
                     "risk_score",
                     "evidence_source_type",
                     "finding_basis",
+                    "correlation_key",
+                    "merged_finding_ids",
+                    "merged_evidence_sources",
                     "evidence_collected_at",
                     "raw_evidence_path",
                     "asset_role",
@@ -376,6 +408,9 @@ class ReportGenerator:
                         "risk_score": finding.risk_score,
                         "evidence_source_type": finding.evidence_source_type,
                         "finding_basis": finding.finding_basis,
+                        "correlation_key": finding.correlation_key,
+                        "merged_finding_ids": " | ".join(finding.merged_finding_ids),
+                        "merged_evidence_sources": " | ".join(finding.merged_evidence_sources),
                         "evidence_collected_at": finding.evidence_collected_at,
                         "raw_evidence_path": finding.raw_evidence_path,
                         "asset_role": finding.asset_role,
@@ -411,6 +446,8 @@ class ReportGenerator:
                         "session_context": self.session.database.get_metadata("session_context", {}),
                         "callback_status_detail": self.session.database.get_metadata("callback_status", {}),
                         "estate_summary": self.session.database.get_metadata("estate_summary", {}),
+                        "finding_correlation": self.session.database.get_metadata("finding_correlation", {}),
+                        "module_activation_plan": self.session.database.get_metadata("module_activation_plan", []),
                         "inventory_assets": self.session.database.get_metadata("inventory_assets", []),
                         "module_statuses": [
                             {
@@ -537,6 +574,8 @@ def _appendix_payload(
     callback_detail = session.database.get_metadata("callback_status", {})
     manifest_summary = session.database.get_metadata("evidence_manifest", {})
     scanner_sources = session.database.get_metadata("scanner_sources", [])
+    correlation = session.database.get_metadata("finding_correlation", {})
+    activation_plan = session.database.get_metadata("module_activation_plan", [])
     manifest_entries = _manifest_entries(session)
     import_sources = sorted(
         {
@@ -562,6 +601,10 @@ def _appendix_payload(
         "callback_summary": callback_detail.get("status_message", callback_status),
         "manifest_entry_count": manifest_summary.get("entry_count", len(manifest_entries)),
         "manifest_entries": manifest_entries[:8],
+        "correlation_summary": (
+            f"merged={correlation.get('merged_count', 0)} suppressed={correlation.get('suppressed_count', 0)}"
+        ),
+        "activation_plan": activation_plan if isinstance(activation_plan, list) else [],
     }
 
 

@@ -14,6 +14,8 @@ from app.core.integrity import SessionAuditor, generate_evidence_manifest, store
 from app.core.inventory import AssetInventory
 from app.core.models import AssessmentResult, Finding, ModuleResult
 from app.core.session import AssessmentSession
+from app.engine.aggregation import estate_summary, generate_aggregate_findings
+from app.engine.correlation import correlate_findings
 from app.engine.risk import score_finding
 from app.export.bundle import BundleExporter
 from app.profiling.environment import EnvironmentProfile, EnvironmentProfiler
@@ -161,7 +163,37 @@ def finalize_assessment(
 ) -> AssessmentResult:
     """Generate reports, bundle, and optional callback without failing the assessment."""
 
-    stored_findings = session.database.list_findings()
+    raw_findings = session.database.list_findings()
+    inventory = AssetInventory(session, config)
+    correlation = correlate_findings(raw_findings)
+    correlated_findings = [inventory.enrich_finding(finding) for finding in correlation.findings]
+    for finding in correlated_findings:
+        finding.risk_score = score_finding(finding)
+    aggregate_findings = generate_aggregate_findings(
+        findings=correlated_findings,
+        inventory=inventory,
+        package=package,
+    )
+    for finding in aggregate_findings:
+        inventory.enrich_finding(finding)
+        finding.risk_score = score_finding(finding)
+    stored_findings = sorted(
+        [*correlated_findings, *aggregate_findings],
+        key=lambda item: (-int(item.risk_score), item.finding_id),
+    )
+    session.database.set_metadata("estate_summary", estate_summary(inventory=inventory, findings=stored_findings))
+    session.database.set_metadata(
+        "inventory_assets",
+        [record.to_db_payload() for record in inventory.list_assets()],
+    )
+    session.database.set_metadata(
+        "finding_correlation",
+        {
+            "merged_count": correlation.merged_count,
+            "suppressed_count": correlation.suppressed_count,
+            "groups": correlation.groups,
+        },
+    )
     report_generator = ReportGenerator(
         session=session,
         company_name=config.report_company_name,
@@ -229,6 +261,7 @@ def finalize_assessment(
         "callback_status": callback_status,
         "manifest_path": str(manifest_path),
         "bundle_hash_path": str(bundle_hash_path),
+        "correlated_findings": len(stored_findings),
     })
     logging.getLogger("soun_runner").info(
         "%s package complete with %s findings", package, len(stored_findings)
