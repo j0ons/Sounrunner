@@ -37,3 +37,30 @@ def test_preflight_warns_for_callback_misconfiguration(tmp_path: Path) -> None:
     assert config is not None
     assert report.overall_status == "degraded"
     assert any(check.name == "callback" and check.status == "warning" for check in report.checks)
+
+
+def test_preflight_reports_estate_readiness(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "assessment:",
+                "  approved_scopes:",
+                "    - 10.0.0.0/24",
+                "remote_windows:",
+                "  enabled: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config, report = run_preflight(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        log_dir=tmp_path / "logs",
+    )
+
+    assert config is not None
+    estate_check = next(check for check in report.checks if check.name == "estate_readiness")
+    assert estate_check.status == "ok"
+    assert "10.0.0.0/24" in estate_check.detail

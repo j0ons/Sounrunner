@@ -78,6 +78,7 @@ def run_preflight(
     checks.append(_nmap_check(config))
     checks.append(_secret_sources_check(config))
     checks.extend(_remote_windows_checks(config))
+    checks.append(_estate_readiness_check(config))
     checks.append(_callback_check(config))
     checks.append(_scope_defaults_check(config))
 
@@ -323,6 +324,54 @@ def _scope_defaults_check(config: AppConfig | None) -> PreflightCheck:
         name="scope_defaults",
         status="ok",
         detail=f"Default approved scopes present: {', '.join(scopes)}",
+    )
+
+
+def _estate_readiness_check(config: AppConfig | None) -> PreflightCheck:
+    if not config:
+        return PreflightCheck(
+            name="estate_readiness",
+            status="skipped",
+            detail="Config unavailable. Estate readiness could not be evaluated.",
+        )
+    scopes = _configured_scopes(config)
+    connectors = []
+    if config.remote_windows.enabled:
+        connectors.append("remote_windows")
+    if config.active_directory.enabled:
+        connectors.append("active_directory")
+    if config.firewall_vpn_import.enabled and config.firewall_vpn_import.import_paths:
+        connectors.append("firewall_vpn_import")
+    if config.backup_platform_import.enabled and config.backup_platform_import.import_paths:
+        connectors.append("backup_platform_import")
+    if config.scanner_integrations.nessus_import_path or config.scanner_integrations.greenbone_import_path:
+        connectors.append("scanner_file_import")
+    if config.scanner_integrations.nessus_api.enabled or config.scanner_integrations.greenbone_api.enabled:
+        connectors.append("scanner_api")
+    if config.m365_entra.enabled or config.m365_entra.evidence_json_path:
+        connectors.append("m365_entra")
+    if not scopes:
+        return PreflightCheck(
+            name="estate_readiness",
+            status="warning",
+            detail="No approved scopes are configured. Standard/Advanced cannot run headless without an approved scope.",
+        )
+    if not connectors:
+        return PreflightCheck(
+            name="estate_readiness",
+            status="warning",
+            detail=(
+                f"Approved scopes present ({', '.join(scopes)}), but no estate connector is configured. "
+                "Standard/Advanced coverage will be discovery-heavy or local-only."
+            ),
+        )
+    return PreflightCheck(
+        name="estate_readiness",
+        status="ok",
+        detail=(
+            f"Approved scopes present ({', '.join(scopes)}). "
+            f"Estate connectors configured: {', '.join(connectors)}."
+        ),
     )
 
 

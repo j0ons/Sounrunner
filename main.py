@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use approved scopes from config without prompting for scope.",
     )
     parser.add_argument(
+        "--consent-confirmed",
+        action="store_true",
+        help="Confirm that written authorization and approved scope have already been validated for this run.",
+    )
+    parser.add_argument(
         "--version",
         action="store_true",
         help="Print the application version and exit.",
@@ -193,6 +198,16 @@ def main() -> int:
         )
         session = SessionManager(config).create_session(intake)
         store_preflight_report(session, preflight.to_dict())
+        session.database.set_metadata(
+            "launch_context",
+            {
+                "non_interactive": bool(args.non_interactive),
+                "report_mode": report_mode,
+                "warnings": launch_warnings,
+                "scope_from_config": bool(args.scope_from_config),
+                "consent_confirmed_via_cli": bool(args.consent_confirmed),
+            },
+        )
         if preflight.overall_status == "degraded":
             ui.warn(
                 "Preflight degraded. Missing dependencies or limited access will be marked as partial or skipped."
@@ -288,7 +303,8 @@ def _resolve_intake(
 
 def _build_seed_intake(args: argparse.Namespace, config: AppConfig) -> AssessmentIntake:
     package = normalize_prompt_value(args.package or config.assessment.package).lower()
-    scope = _scope_value_from_config(config) if (args.scope_from_config or _scope_value_from_config(config)) else ""
+    configured_scope = _scope_value_from_config(config)
+    scope = configured_scope if (args.scope_from_config or configured_scope) else ""
     return AssessmentIntake(
         client_name=normalize_prompt_value(args.client_name or config.assessment.client_name),
         site=normalize_prompt_value(args.site or config.assessment.site),
@@ -296,7 +312,7 @@ def _build_seed_intake(args: argparse.Namespace, config: AppConfig) -> Assessmen
         package=package,
         authorized_scope=scope,
         scope_notes=normalize_prompt_value(config.assessment.scope_notes),
-        consent_confirmed=bool(config.assessment.consent_confirmed),
+        consent_confirmed=bool(args.consent_confirmed or config.assessment.consent_confirmed),
         domain=normalize_prompt_value(config.assessment.client_domain) or None,
         m365_connector=bool(config.m365_entra.enabled or config.m365_entra.evidence_json_path),
         host_allowlist=list(config.assessment.host_allowlist),

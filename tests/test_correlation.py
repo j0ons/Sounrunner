@@ -115,3 +115,57 @@ def test_correlation_preserves_unrelated_findings() -> None:
     assert result.merged_count == 0
     assert result.suppressed_count == 0
     assert {item.finding_id for item in result.findings} == {"BACKUP-1", "FW-1"}
+
+
+def test_correlation_merges_backup_findings_from_multiple_sources() -> None:
+    direct = Finding(
+        finding_id="BACKUP-LOCAL-1",
+        title="Backup indicators are missing on the host",
+        category="Backup Readiness",
+        package="standard",
+        severity="medium",
+        confidence="weak",
+        asset="server-03",
+        evidence_summary="No backup software indicator was visible on the host.",
+        evidence_files=["host.json"],
+        why_it_matters="Missing host-level backup evidence weakens recovery assurance.",
+        likely_business_impact="Recovery assurance is lower for this asset.",
+        remediation_steps=["Validate backup coverage for the host."],
+        validation_steps=["Confirm the asset is covered by an approved backup job."],
+        owner_role="Backup Owner",
+        effort="medium",
+        evidence_source_type="windows_native",
+        evidence_collected_at="2026-01-01T00:00:00+00:00",
+        raw_evidence_path="host.json",
+        finding_basis="direct_system_evidence",
+        risk_score=61,
+    )
+    imported = Finding(
+        finding_id="BACKUP-IMPORT-1",
+        title="Last successful backup appears stale in imported evidence",
+        category="Backup Platform Evidence",
+        package="standard",
+        severity="high",
+        confidence="strong",
+        asset="server-03",
+        evidence_summary="Imported backup evidence shows the last success is 14 days old.",
+        evidence_files=["backup.json"],
+        why_it_matters="Stale backup evidence weakens recovery confidence.",
+        likely_business_impact="Recovery point objectives may not be met.",
+        remediation_steps=["Restore reliable backup coverage."],
+        validation_steps=["Confirm a recent successful backup."],
+        owner_role="Backup Owner",
+        effort="medium",
+        evidence_source_type="backup_platform_import",
+        evidence_collected_at="2026-01-01T00:00:00+00:00",
+        raw_evidence_path="backup.json",
+        finding_basis="imported_configuration_evidence",
+        risk_score=76,
+    )
+
+    result = correlate_findings([direct, imported])
+
+    assert result.merged_count == 1
+    merged = result.findings[0]
+    assert merged.correlation_key == "backup_coverage"
+    assert set(merged.evidence_files) == {"host.json", "backup.json"}

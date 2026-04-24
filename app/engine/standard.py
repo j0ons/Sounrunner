@@ -10,8 +10,14 @@ from app.core.config import AppConfig
 from app.core.inventory import AssetInventory
 from app.core.models import AssessmentResult, ModuleResult
 from app.core.session import AssessmentSession
-from app.engine.common import collect_evidence_context, finalize_assessment, run_modules
+from app.engine.common import (
+    collect_evidence_context,
+    finalize_assessment,
+    record_planned_skips,
+    run_modules,
+)
 from app.engine.orchestrator import EstateAssessmentModule
+from app.engine.planner import build_assessment_plan, persist_assessment_plan
 from app.modules.active_directory import ActiveDirectoryModule
 from app.modules.backup_readiness import BackupReadinessModule
 from app.modules.backup_platform_import import BackupPlatformImportModule
@@ -55,34 +61,43 @@ class StandardPackageRunner:
         standard_config.nmap = copy.copy(self.config.nmap)
         standard_config.nmap.top_ports = self.config.standard.extended_nmap_top_ports
 
-        modules = [
-            IdentityModule(self.session, context.profile, context.windows_evidence),
-            EndpointModule(self.session, context.profile, context.windows_evidence),
-            NetworkExposureLiteModule(
+        plan = build_assessment_plan(session=self.session, config=self.config, package="standard")
+        persist_assessment_plan(self.session, plan)
+        self.ui.print_module_activation_plan(plan.module_activation_plan())
+        for warning in plan.warnings:
+            self.ui.warn(warning)
+        record_planned_skips(session=self.session, plan=plan)
+
+        candidate_modules = {
+            "identity": IdentityModule(self.session, context.profile, context.windows_evidence),
+            "endpoint": EndpointModule(self.session, context.profile, context.windows_evidence),
+            "network_lite": NetworkExposureLiteModule(
                 self.session,
                 context.profile,
                 standard_config,
                 context.windows_evidence,
                 run_scope_scan=False,
             ),
-            EmailSecurityModule(self.session, context.profile, self.config.email_security),
-            M365EntraModule(self.session, self.config.m365_entra),
-            ScannerImportModule(self.session, self.config),
-            FirewallVpnImportModule(self.session, self.config),
-            BackupPlatformImportModule(self.session, self.config),
-            ActiveDirectoryModule(self.session, self.config),
-            EstateAssessmentModule(self.session, self.config, package="standard"),
-            BackupReadinessModule(self.session, context.windows_evidence),
-            PrivilegedAccessModule(self.session, context.windows_evidence),
-            IncidentReadinessModule(self.session, context.windows_evidence),
-            RansomwareReadinessModule(
+            "email_security": EmailSecurityModule(self.session, context.profile, self.config.email_security),
+            "m365_entra": M365EntraModule(self.session, self.config.m365_entra),
+            "scanner_imports": ScannerImportModule(self.session, self.config),
+            "firewall_vpn_import": FirewallVpnImportModule(self.session, self.config),
+            "backup_platform_import": BackupPlatformImportModule(self.session, self.config),
+            "active_directory": ActiveDirectoryModule(self.session, self.config),
+            "estate_orchestration": EstateAssessmentModule(self.session, self.config, package="standard"),
+            "backup_readiness": BackupReadinessModule(self.session, context.windows_evidence),
+            "privileged_access": PrivilegedAccessModule(self.session, context.windows_evidence),
+            "incident_readiness": IncidentReadinessModule(self.session, context.windows_evidence),
+            "ransomware_readiness": RansomwareReadinessModule(
                 self.session,
                 warn_threshold=self.config.standard.ransomware_score_warn_threshold,
             ),
+        }
+        modules = [
+            candidate_modules[entry.module_name]
+            for entry in plan.modules
+            if entry.should_run and entry.module_name in candidate_modules
         ]
-        activation_plan = _standard_activation_plan(self.session, self.config)
-        self.session.database.set_metadata("module_activation_plan", activation_plan)
-        self.ui.print_module_activation_plan(activation_plan)
         run_modules(config=self.config, session=self.session, ui=self.ui, modules=modules)
         return finalize_assessment(
             config=self.config,
@@ -231,109 +246,3 @@ def _looks_like_ip(value: str) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _standard_activation_plan(session: AssessmentSession, config: AppConfig) -> list[dict[str, str]]:
-    return [
-        {
-            "module_name": "identity",
-            "activation": "active",
-            "reason": "Core local host evidence is always collected for Standard.",
-        },
-        {
-            "module_name": "endpoint",
-            "activation": "active",
-            "reason": "Core local host evidence is always collected for Standard.",
-        },
-        {
-            "module_name": "network_lite",
-            "activation": "active",
-            "reason": "Local exposure checks support host baseline and remote exposure correlation.",
-        },
-        {
-            "module_name": "email_security",
-            "activation": "active" if session.intake.domain else "not_configured",
-            "reason": "Client email domain provided." if session.intake.domain else "No client email domain configured.",
-        },
-        {
-            "module_name": "m365_entra",
-            "activation": "active" if config.m365_entra.enabled or config.m365_entra.evidence_json_path else "not_configured",
-            "reason": (
-                "M365/Entra evidence is configured."
-                if config.m365_entra.enabled or config.m365_entra.evidence_json_path
-                else "No M365/Entra connector or import configured."
-            ),
-        },
-        {
-            "module_name": "scanner_imports",
-            "activation": "active" if _scanner_sources_present(config) else "not_configured",
-            "reason": (
-                "Scanner imports or APIs are configured."
-                if _scanner_sources_present(config)
-                else "No Nessus or Greenbone import/API source configured."
-            ),
-        },
-        {
-            "module_name": "firewall_vpn_import",
-            "activation": "active" if config.firewall_vpn_import.import_paths else "not_configured",
-            "reason": (
-                "Firewall/VPN import paths configured."
-                if config.firewall_vpn_import.import_paths
-                else "No firewall/VPN import paths configured."
-            ),
-        },
-        {
-            "module_name": "backup_platform_import",
-            "activation": "active" if config.backup_platform_import.import_paths else "not_configured",
-            "reason": (
-                "Backup platform import paths configured."
-                if config.backup_platform_import.import_paths
-                else "No backup platform import paths configured."
-            ),
-        },
-        {
-            "module_name": "active_directory",
-            "activation": "active" if config.active_directory.enabled else "not_configured",
-            "reason": (
-                "Active Directory evidence is enabled."
-                if config.active_directory.enabled
-                else "AD evidence disabled in config."
-            ),
-        },
-        {
-            "module_name": "estate_orchestration",
-            "activation": "active",
-            "reason": "Standard defaults to company-wide discovery and collection inside approved scope.",
-        },
-        {
-            "module_name": "backup_readiness",
-            "activation": "active",
-            "reason": "Backup readiness combines endpoint, import, and questionnaire evidence.",
-        },
-        {
-            "module_name": "privileged_access",
-            "activation": "active",
-            "reason": "Privileged access review correlates local, directory, and governance evidence.",
-        },
-        {
-            "module_name": "incident_readiness",
-            "activation": "active",
-            "reason": "Incident readiness remains part of Standard reporting.",
-        },
-        {
-            "module_name": "ransomware_readiness",
-            "activation": "active",
-            "reason": "Ransomware readiness is derived from collected estate evidence.",
-        },
-    ]
-
-
-def _scanner_sources_present(config: AppConfig) -> bool:
-    return any(
-        [
-            config.scanner_integrations.nessus_import_path,
-            config.scanner_integrations.greenbone_import_path,
-            config.scanner_integrations.nessus_api.enabled,
-            config.scanner_integrations.greenbone_api.enabled,
-        ]
-    )

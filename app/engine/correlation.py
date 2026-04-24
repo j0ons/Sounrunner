@@ -67,11 +67,22 @@ def correlate_findings(findings: list[Finding]) -> CorrelationResult:
 def _should_merge(findings: list[Finding]) -> bool:
     if len(findings) < 2:
         return False
-    distinct_sources = {
-        (finding.finding_basis, finding.evidence_source_type, finding.title)
+    distinct_signals = {
+        (
+            finding.finding_basis,
+            finding.evidence_source_type,
+            finding.title,
+            finding.raw_evidence_path,
+        )
         for finding in findings
     }
-    return len(distinct_sources) >= 2
+    distinct_paths = {
+        path
+        for finding in findings
+        for path in finding.evidence_files
+        if path
+    }
+    return len(distinct_signals) >= 2 or len(distinct_paths) >= 2
 
 
 def _merge_group(family: str, findings: list[Finding]) -> Finding:
@@ -129,15 +140,22 @@ def _correlation_family(finding: Finding) -> str:
         return "rdp_exposure"
     if "smb" in blob or "netbios" in blob or "445" in blob:
         return "smb_exposure"
-    if "local admin" in blob or "administrators group" in blob or "privileged" in blob or "shared account" in blob:
+    if (
+        "local admin" in blob
+        or "administrators group" in blob
+        or "privileged" in blob
+        or "shared account" in blob
+        or "domain admin" in blob
+        or "enterprise admin" in blob
+    ):
         return "privileged_access"
-    if "backup" in blob and "restore" in blob:
+    if "backup" in blob and ("restore" in blob or "restore test" in blob):
         return "backup_restore"
     if "backup" in blob and ("immutable" in blob or "offline" in blob):
         return "backup_protection"
     if "backup" in blob:
         return "backup_coverage"
-    if "vpn" in blob or "remote access" in blob:
+    if "vpn" in blob or "remote access" in blob or "administrative interface exposure" in blob or "winrm" in blob:
         return "remote_access"
     return ""
 

@@ -93,6 +93,7 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --package standard `
   --scope-from-config `
   --non-interactive `
+  --consent-confirmed `
   --report-mode standard
 ```
 
@@ -165,9 +166,10 @@ How it works:
    - imported backup platform evidence
    - configured cloud evidence
 3. Asset records are enriched with hostname/FQDN, site, business unit, role, criticality, and evidence lineage.
-4. The orchestrator plans remote Windows collection automatically for eligible in-scope hosts.
-5. Discovery-only, imported-only, partial, unreachable, and fully assessed states are preserved honestly.
-6. Estate-level coverage and repeated control issues are generated automatically in Standard and Advanced.
+4. The assessment planner decides which connectors and modules should run, records explicit active/not-configured reasons, and warns when coverage will be limited.
+5. The orchestrator plans remote Windows collection automatically for eligible in-scope hosts.
+6. Discovery-only, imported-only, partial, unreachable, and fully assessed states are preserved honestly.
+7. Estate-level coverage, repeated control issues, and coverage gaps are generated automatically in Standard and Advanced.
 
 Discovery-only vs fully assessed:
 
@@ -192,6 +194,7 @@ Supported launch overrides:
 - `--site`
 - `--operator`
 - `--scope-from-config`
+- `--consent-confirmed`
 - `--report-mode`
 - existing `--preflight`, `--healthcheck`, `--show-queue`, and `--retry-callbacks`
 
@@ -212,6 +215,7 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --package advanced `
   --scope-from-config `
   --non-interactive `
+  --consent-confirmed `
   --report-mode advanced
 ```
 
@@ -229,6 +233,20 @@ Examples:
 - If Nessus or Greenbone imports/API are configured, scanner evidence is ingested.
 
 Activation decisions are written into metadata and surfaced in the run output. Missing connectors are marked `not_configured`, `skipped`, or `partial`. They are not silently ignored.
+
+## Assessment Brain
+
+Standard and Advanced now use a central planning layer instead of scattered per-module assumptions.
+
+What that plan does:
+
+1. reads approved scope and connector state
+2. records which discovery sources are active
+3. marks which modules will run and which are not configured
+4. drives estate discovery and remote collection planning
+5. feeds assessment warnings and coverage gaps into the final report
+
+This matters because the final report now explains why an asset was fully assessed, partially assessed, discovery-only, or import-only.
 
 ## Finding Correlation And Deduplication
 

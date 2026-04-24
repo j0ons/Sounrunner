@@ -106,6 +106,52 @@ def test_non_interactive_launch_fails_cleanly_on_missing_values(tmp_path: Path) 
         _resolve_intake(args=args, config=config, ui=DummyUi())  # type: ignore[arg-type]
 
 
+def test_non_interactive_cli_consent_flag_satisfies_launch_validation(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+read_only: true
+assessment:
+  client_name: "Contoso"
+  site: "HQ"
+  operator_name: "Operator"
+  package: "standard"
+  approved_scopes:
+    - "10.0.0.0/24"
+""",
+        encoding="utf-8",
+    )
+    config = AppConfig.load(config_file)
+    args = build_parser().parse_args(
+        ["--config", str(config_file), "--non-interactive", "--consent-confirmed"]
+    )
+
+    intake = _resolve_intake(args=args, config=config, ui=DummyUi())  # type: ignore[arg-type]
+
+    assert intake.consent_confirmed is True
+
+
+def test_non_interactive_launch_fails_cleanly_on_missing_scope(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+read_only: true
+assessment:
+  client_name: "Contoso"
+  site: "HQ"
+  operator_name: "Operator"
+  package: "standard"
+  consent_confirmed: true
+""",
+        encoding="utf-8",
+    )
+    config = AppConfig.load(config_file)
+    args = build_parser().parse_args(["--config", str(config_file), "--non-interactive"])
+
+    with pytest.raises(ValueError, match="missing authorized_scope"):
+        _resolve_intake(args=args, config=config, ui=DummyUi())  # type: ignore[arg-type]
+
+
 def test_launch_warnings_flag_limited_standard_scope() -> None:
     config = AppConfig()
     intake = AssessmentIntake(

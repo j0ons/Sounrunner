@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,10 +36,14 @@ class AssetRecord:
     directory_site: str = ""
     directory_ou: str = ""
     discovery_source: str = ""
+    discovery_sources: list[str] = field(default_factory=list)
     first_seen: str = ""
     last_seen: str = ""
+    last_successful_evidence_source: str = ""
     assessment_status: str = "discovery_only"
     collector_status: str = "not_started"
+    remoting_eligible: bool = False
+    remoting_eligibility_reason: str = ""
     error_state: str = ""
     evidence_references: list[str] = field(default_factory=list)
 
@@ -66,10 +71,14 @@ class AssetRecord:
             "directory_site": self.directory_site,
             "directory_ou": self.directory_ou,
             "discovery_source": self.discovery_source,
+            "discovery_sources": list(self.discovery_sources),
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
+            "last_successful_evidence_source": self.last_successful_evidence_source,
             "assessment_status": self.assessment_status,
             "collector_status": self.collector_status,
+            "remoting_eligible": self.remoting_eligible,
+            "remoting_eligibility_reason": self.remoting_eligibility_reason,
             "error_state": self.error_state,
         }
 
@@ -98,10 +107,14 @@ class AssetRecord:
             directory_site=str(row.get("directory_site", "")),
             directory_ou=str(row.get("directory_ou", "")),
             discovery_source=str(row.get("discovery_source", "")),
+            discovery_sources=_json_list(row.get("discovery_sources_json", row.get("discovery_sources", []))),
             first_seen=str(row.get("first_seen", "")),
             last_seen=str(row.get("last_seen", "")),
+            last_successful_evidence_source=str(row.get("last_successful_evidence_source", "")),
             assessment_status=str(row.get("assessment_status", "")),
             collector_status=str(row.get("collector_status", "")),
+            remoting_eligible=bool(row.get("remoting_eligible", 0)),
+            remoting_eligibility_reason=str(row.get("remoting_eligibility_reason", "")),
             error_state=str(row.get("error_state", "")),
             evidence_references=list(evidence_references or []),
         )
@@ -134,8 +147,10 @@ class AssetInventory:
             site_label=label or self.session.intake.site,
             business_unit=self.session.scope.business_unit or self.session.intake.business_unit,
             discovery_source="local_environment_profile",
+            discovery_sources=["local_environment_profile"],
             first_seen=utc_now(),
             last_seen=utc_now(),
+            last_successful_evidence_source="local_environment_profile",
             assessment_status="assessed",
             collector_status="complete",
         )
@@ -169,10 +184,14 @@ class AssetInventory:
             directory_site=existing.directory_site if existing else "",
             directory_ou=existing.directory_ou if existing else "",
             discovery_source=source,
+            discovery_sources=_merged_sources(existing.discovery_sources if existing else [], source),
             first_seen=existing.first_seen if existing else now,
             last_seen=now,
+            last_successful_evidence_source=source,
             assessment_status=existing.assessment_status if existing else "discovery_only",
             collector_status=existing.collector_status if existing else "not_started",
+            remoting_eligible=existing.remoting_eligible if existing else False,
+            remoting_eligibility_reason=existing.remoting_eligibility_reason if existing else "",
             error_state=existing.error_state if existing else "",
         )
         record = self.classify_asset(
@@ -215,10 +234,14 @@ class AssetInventory:
             directory_site=directory_site or (existing.directory_site if existing else ""),
             directory_ou=_ou_from_dn(dn),
             discovery_source="active_directory",
+            discovery_sources=_merged_sources(existing.discovery_sources if existing else [], "active_directory"),
             first_seen=existing.first_seen if existing else utc_now(),
             last_seen=utc_now(),
+            last_successful_evidence_source="active_directory",
             assessment_status=existing.assessment_status if existing else "imported_evidence_only",
             collector_status=existing.collector_status if existing else "directory_only",
+            remoting_eligible=existing.remoting_eligible if existing else False,
+            remoting_eligibility_reason=existing.remoting_eligibility_reason if existing else "",
             error_state=existing.error_state if existing else "",
         )
         record = self.classify_asset(
@@ -260,10 +283,14 @@ class AssetInventory:
             directory_site=existing.directory_site if existing else "",
             directory_ou=existing.directory_ou if existing else "",
             discovery_source=source,
+            discovery_sources=_merged_sources(existing.discovery_sources if existing else [], source),
             first_seen=existing.first_seen if existing else utc_now(),
             last_seen=utc_now(),
+            last_successful_evidence_source=source,
             assessment_status=existing.assessment_status if existing else "imported_evidence_only",
             collector_status=existing.collector_status if existing else "import_only",
+            remoting_eligible=existing.remoting_eligible if existing else False,
+            remoting_eligibility_reason=existing.remoting_eligibility_reason if existing else "",
             error_state=existing.error_state if existing else "",
         )
         record = self.classify_asset(record, metadata_source=source)
@@ -341,6 +368,28 @@ class AssetInventory:
     def attach_evidence(self, asset_id: str, evidence_path: str, source_module: str) -> None:
         self.session.database.add_asset_evidence(asset_id, evidence_path, source_module)
 
+    def update_remoting_eligibility(self, asset_id: str, *, eligible: bool, reason: str) -> None:
+        current = self.session.database.get_asset_by_id(asset_id)
+        if not current:
+            return
+        payload = dict(current)
+        payload["remoting_eligible"] = 1 if eligible else 0
+        payload["remoting_eligibility_reason"] = reason
+        payload["last_seen"] = utc_now()
+        self.session.database.upsert_asset(payload)
+
+    def record_successful_source(self, asset_id: str, source: str) -> None:
+        current = self.session.database.get_asset_by_id(asset_id)
+        if not current:
+            return
+        payload = dict(current)
+        existing_sources = _json_list(payload.get("discovery_sources_json", payload.get("discovery_sources", [])))
+        payload["discovery_sources"] = _merged_sources(existing_sources, source)
+        payload["discovery_source"] = source
+        payload["last_successful_evidence_source"] = source
+        payload["last_seen"] = utc_now()
+        self.session.database.upsert_asset(payload)
+
     def mark_status(
         self,
         asset_id: str,
@@ -368,10 +417,14 @@ class AssetInventory:
             "directory_site": "",
             "directory_ou": "",
             "discovery_source": "",
+            "discovery_sources": [],
             "first_seen": utc_now(),
             "last_seen": utc_now(),
+            "last_successful_evidence_source": "",
             "assessment_status": "discovery_only",
             "collector_status": "not_started",
+            "remoting_eligible": 0,
+            "remoting_eligibility_reason": "",
             "error_state": "",
         }
         payload = dict(current)
@@ -440,6 +493,8 @@ class AssetInventory:
             "by_subnet": dict(sorted(by_subnet.items())),
             "by_role": dict(sorted(by_role.items())),
             "by_criticality": dict(sorted(by_criticality.items())),
+            "remoting_eligible": sum(1 for asset in assets if asset.remoting_eligible),
+            "remoting_ineligible": sum(1 for asset in assets if not asset.remoting_eligible),
         }
 
 
@@ -572,3 +627,28 @@ def _status_bucket() -> dict[str, int]:
         "discovery_only": 0,
         "imported_evidence_only": 0,
     }
+
+
+def _merged_sources(existing: list[str], source: str) -> list[str]:
+    merged = [item for item in existing if str(item).strip()]
+    cleaned = source.strip()
+    if cleaned and cleaned not in merged:
+        merged.append(cleaned)
+    return merged
+
+
+def _json_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError:
+            return [text]
+        if isinstance(loaded, list):
+            return [str(item) for item in loaded if str(item).strip()]
+        return [text]
+    return []

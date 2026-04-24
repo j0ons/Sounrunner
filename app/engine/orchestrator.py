@@ -107,7 +107,7 @@ class EstateAssessmentModule:
             },
         )
 
-        planned_targets, planning_notes = self._plan_remote_targets(inventory)
+        planned_targets, eligible_records, planning_notes = self._plan_remote_targets(inventory)
         details.extend(planning_notes)
         remote_outcomes: list[HostCollectionOutcome] = []
         if self.config.remote_windows.enabled and planned_targets:
@@ -123,7 +123,7 @@ class EstateAssessmentModule:
             details.append("Remote Windows collection disabled or no eligible estate targets were planned.")
             self._mark_uncollected_targets(
                 inventory=inventory,
-                records=[record for _, record in planned_targets] if planned_targets else inventory.list_assets(),
+                records=eligible_records,
                 reason=(
                     "Remote collection disabled or no eligible remote collection configuration."
                     if not self.config.remote_windows.enabled
@@ -150,6 +150,7 @@ class EstateAssessmentModule:
                 "discovery_detail": discovery_result.detail,
                 "discovered_assets": len(discovery_result.assets),
                 "in_scope_assets": len(eligible_assets),
+                "eligible_remote_assets": len(eligible_records),
                 "planned_remote_targets": len(planned_targets),
             },
         )
@@ -224,18 +225,33 @@ class EstateAssessmentModule:
     def _plan_remote_targets(
         self,
         inventory: AssetInventory,
-    ) -> tuple[list[tuple[str, AssetRecord]], list[str]]:
+    ) -> tuple[list[tuple[str, AssetRecord]], list[AssetRecord], list[str]]:
         records = inventory.list_assets()
         planned: list[tuple[str, AssetRecord]] = []
+        eligible_records: list[AssetRecord] = []
         notes: list[str] = []
         seen_targets: set[str] = set()
         skipped = 0
+        reason_counts: dict[str, int] = {}
         for record in records:
-            if not self._eligible_for_remote_collection(record):
+            eligibility = self._remote_collection_eligibility(record)
+            inventory.update_remoting_eligibility(
+                record.asset_id,
+                eligible=eligibility["eligible"],
+                reason=eligibility["reason"],
+            )
+            if not eligibility["eligible"]:
+                reason_counts[eligibility["reason"]] = reason_counts.get(eligibility["reason"], 0) + 1
                 continue
+            eligible_records.append(inventory.find_asset(record.asset_id) or record)
             target = self._resolve_remote_target(record, inventory)
             if not target:
                 skipped += 1
+                inventory.update_remoting_eligibility(
+                    record.asset_id,
+                    eligible=False,
+                    reason="No approved in-scope IP or resolvable hostname was available for WinRM collection.",
+                )
                 self.session.database.upsert_asset_module_status(
                     record.asset_id,
                     "remote_windows_collection",
@@ -250,19 +266,34 @@ class EstateAssessmentModule:
         notes.append(
             f"Remote collection planning considered {len(records)} inventory asset(s) and queued {len(planned)} target(s)."
         )
+        if reason_counts:
+            notes.append(
+                "Remote eligibility rejections: "
+                + ", ".join(f"{reason}={count}" for reason, count in sorted(reason_counts.items()))
+                + "."
+            )
         if skipped:
             notes.append(
                 f"{skipped} asset(s) remained discovery-only or imported-only because no approved in-scope WinRM target could be resolved."
             )
-        return planned, notes
+        return planned, eligible_records, notes
 
-    def _eligible_for_remote_collection(self, record: AssetRecord) -> bool:
+    def _remote_collection_eligibility(self, record: AssetRecord) -> dict[str, str | bool]:
         if record.discovery_source == "local_environment_profile":
-            return False
+            return {
+                "eligible": False,
+                "reason": "Local host baseline is already collected directly and is not queued for remote collection.",
+            }
         if record.asset_role == "network_device":
-            return False
+            return {
+                "eligible": False,
+                "reason": "Network devices are out of scope for the Windows remote collector.",
+            }
         if record.collector_status == "complete" and record.assessment_status == "assessed":
-            return False
+            return {
+                "eligible": False,
+                "reason": "Asset already has complete direct collection evidence.",
+            }
         os_blob = f"{record.os_family} {record.os_guess}".lower()
         if os_blob and "windows" not in os_blob and record.asset_role not in {
             "server",
@@ -270,8 +301,14 @@ class EstateAssessmentModule:
             "domain_controller",
             "unknown",
         }:
-            return False
-        return True
+            return {
+                "eligible": False,
+                "reason": "Available asset evidence does not indicate a Windows-compatible remote collection target.",
+            }
+        return {
+            "eligible": True,
+            "reason": "Asset is in scope and has no complete direct Windows collection evidence yet.",
+        }
 
     def _resolve_remote_target(
         self,
@@ -370,6 +407,7 @@ class EstateAssessmentModule:
 
         findings: list[Finding] = []
         if result.status in {"complete", "partial"}:
+            inventory.record_successful_source(record.asset_id, "remote_windows_collection")
             findings.extend(
                 build_identity_findings(
                     asset_name=record.display_name,

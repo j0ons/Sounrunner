@@ -4,6 +4,7 @@ read_only: true
 log_level: "INFO"
 report_company_name: "Soun Al Hosn Cybersecurity LLC"
 assessment:
+  # Set these values for headless Standard/Advanced execution.
   client_name: ""
   site: ""
   operator_name: ""
@@ -172,4 +173,5 @@ callback:
     token_file: ""
     timeout_seconds: 30
 report:
+  # auto uses the package default. Standard/Advanced default to estate-level reporting.
   mode: "auto"

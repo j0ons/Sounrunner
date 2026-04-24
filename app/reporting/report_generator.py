@@ -151,6 +151,17 @@ class ReportGenerator:
                 site_finding_table.setStyle(_table_style("#334155"))
                 story.append(site_finding_table)
                 story.append(Spacer(1, 8))
+            business_unit_finding_rows = _count_rows(
+                estate.get("finding_counts_by_business_unit", {}),
+                "Business Unit",
+                "Finding Count",
+            )
+            if business_unit_finding_rows:
+                story.append(Paragraph("Findings By Business Unit", styles["Heading3"]))
+                business_unit_finding_table = Table(business_unit_finding_rows, repeatRows=1)
+                business_unit_finding_table.setStyle(_table_style("#1E293B"))
+                story.append(business_unit_finding_table)
+                story.append(Spacer(1, 8))
             remoting_rows = _count_rows(
                 estate.get("remoting_failures", {}),
                 "Remoting Failure Category",
@@ -198,6 +209,12 @@ class ReportGenerator:
                 repeated_critical_table.setStyle(_table_style("#7C2D12"))
                 story.append(repeated_critical_table)
                 story.append(Spacer(1, 12))
+            coverage_gaps = estate.get("coverage_gaps", [])
+            if isinstance(coverage_gaps, list) and coverage_gaps:
+                story.append(Paragraph("Coverage Gaps", styles["Heading3"]))
+                for item in coverage_gaps[:8]:
+                    story.append(Paragraph(f"- {item}", styles["Normal"]))
+                story.append(Spacer(1, 8))
 
         module_statuses = self.session.database.list_module_statuses()
         if module_statuses:
@@ -318,6 +335,30 @@ class ReportGenerator:
         story.append(Paragraph(f"Callback/export status: {appendix['callback_summary']}", styles["Normal"]))
         story.append(Paragraph(f"Evidence manifest entries: {appendix['manifest_entry_count']}", styles["Normal"]))
         story.append(Paragraph(f"Finding correlation: {appendix['correlation_summary']}", styles["Normal"]))
+        if appendix["assessment_warnings"]:
+            story.append(
+                Paragraph(
+                    "Assessment warnings: " + " | ".join(str(item) for item in appendix["assessment_warnings"]),
+                    styles["Normal"],
+                )
+            )
+        if appendix["discovery_sources"]:
+            source_rows = [["Source", "Status", "Reason"]]
+            for entry in appendix["discovery_sources"]:
+                if not isinstance(entry, dict):
+                    continue
+                source_rows.append(
+                    [
+                        str(entry.get("source", "")),
+                        str(entry.get("status", "")),
+                        str(entry.get("reason", "")),
+                    ]
+                )
+            if len(source_rows) > 1:
+                source_table = Table(source_rows, repeatRows=1)
+                source_table.setStyle(_table_style("#164E63"))
+                story.append(source_table)
+                story.append(Spacer(1, 8))
         if appendix["activation_plan"]:
             activation_rows = [["Module", "Activation", "Reason"]]
             for entry in appendix["activation_plan"]:
@@ -448,6 +489,9 @@ class ReportGenerator:
                         "estate_summary": self.session.database.get_metadata("estate_summary", {}),
                         "finding_correlation": self.session.database.get_metadata("finding_correlation", {}),
                         "module_activation_plan": self.session.database.get_metadata("module_activation_plan", []),
+                        "assessment_plan": self.session.database.get_metadata("assessment_plan", {}),
+                        "assessment_warnings": self.session.database.get_metadata("assessment_warnings", []),
+                        "launch_context": self.session.database.get_metadata("launch_context", {}),
                         "inventory_assets": self.session.database.get_metadata("inventory_assets", []),
                         "module_statuses": [
                             {
@@ -576,6 +620,8 @@ def _appendix_payload(
     scanner_sources = session.database.get_metadata("scanner_sources", [])
     correlation = session.database.get_metadata("finding_correlation", {})
     activation_plan = session.database.get_metadata("module_activation_plan", [])
+    assessment_plan = session.database.get_metadata("assessment_plan", {})
+    assessment_warnings = session.database.get_metadata("assessment_warnings", [])
     manifest_entries = _manifest_entries(session)
     import_sources = sorted(
         {
@@ -605,6 +651,8 @@ def _appendix_payload(
             f"merged={correlation.get('merged_count', 0)} suppressed={correlation.get('suppressed_count', 0)}"
         ),
         "activation_plan": activation_plan if isinstance(activation_plan, list) else [],
+        "assessment_warnings": assessment_warnings if isinstance(assessment_warnings, list) else [],
+        "discovery_sources": assessment_plan.get("discovery_sources", []) if isinstance(assessment_plan, dict) else [],
     }
 
 
@@ -643,7 +691,18 @@ def _asset_appendix_rows(session: AssessmentSession) -> list[list[str]]:
     inventory = AssetInventory(session).list_assets()
     if not inventory:
         return []
-    rows = [["Host", "IP", "Role", "Criticality", "Type", "Site", "Assessment", "Collector", "Error"]]
+    rows = [[
+        "Host",
+        "IP",
+        "Role",
+        "Criticality",
+        "Site",
+        "Assessment",
+        "Last Evidence",
+        "Remoting",
+        "Lineage",
+        "Error",
+    ]]
     for asset in inventory[:25]:
         rows.append(
             [
@@ -651,10 +710,11 @@ def _asset_appendix_rows(session: AssessmentSession) -> list[list[str]]:
                 asset.ip_address,
                 asset.asset_role,
                 asset.criticality,
-                asset.asset_type,
                 asset.site_label or asset.subnet_label or asset.business_unit,
                 asset.assessment_status,
-                asset.collector_status,
+                asset.last_successful_evidence_source or "none",
+                "eligible" if asset.remoting_eligible else "ineligible",
+                ", ".join(asset.discovery_sources[:3]),
                 asset.error_state[:40],
             ]
         )
@@ -686,7 +746,7 @@ def _estate_posture_text(estate: dict[str, object]) -> str:
     coverage = estate.get("coverage", {}) if isinstance(estate, dict) else {}
     if not isinstance(coverage, dict):
         return ""
-    return (
+    text = (
         "Estate posture summary: "
         f"{coverage.get('total_assets', 0)} assets were tracked, "
         f"{coverage.get('assessed', 0)} were directly assessed, "
@@ -695,6 +755,10 @@ def _estate_posture_text(estate: dict[str, object]) -> str:
         f"{coverage.get('discovery_only', 0)} remained discovery-only, and "
         f"{coverage.get('imported_evidence_only', 0)} relied only on imported evidence."
     )
+    gaps = estate.get("coverage_gaps", [])
+    if isinstance(gaps, list) and gaps:
+        return text + " Coverage gaps: " + " ".join(str(item) for item in gaps[:3])
+    return text
 
 
 def _table_style(header_color: str) -> TableStyle:

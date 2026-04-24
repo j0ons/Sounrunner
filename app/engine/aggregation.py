@@ -76,6 +76,7 @@ def estate_summary(
     by_subnet: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     by_business_unit: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     remoting_failures: dict[str, int] = defaultdict(int)
+    last_evidence_source_counts: dict[str, int] = defaultdict(int)
 
     for asset in records:
         site = asset.site_label or "unlabeled"
@@ -86,6 +87,9 @@ def estate_summary(
         by_business_unit[business_unit][asset.assessment_status or "unknown"] += 1
         if asset.error_state:
             remoting_failures[asset.error_state] += 1
+        last_evidence_source_counts[
+            asset.last_successful_evidence_source or "none"
+        ] += 1
 
     top_repeated = []
     top_repeated_critical = []
@@ -120,6 +124,9 @@ def estate_summary(
         estate_findings,
         lambda item: (asset_index.get(item.asset.lower()).business_unit if asset_index.get(item.asset.lower()) else "unlabeled") or "unlabeled",
     )
+    coverage_gaps = _coverage_gaps(coverage)
+    assessment_plan = inventory.session.database.get_metadata("assessment_plan", {})
+    assessment_warnings = inventory.session.database.get_metadata("assessment_warnings", [])
 
     return {
         "generated_at": utc_now(),
@@ -127,11 +134,17 @@ def estate_summary(
         "by_site": {key: dict(value) for key, value in sorted(by_site.items())},
         "by_subnet": {key: dict(value) for key, value in sorted(by_subnet.items())},
         "by_business_unit": {key: dict(value) for key, value in sorted(by_business_unit.items())},
+        "asset_counts_by_role": coverage.get("by_role", {}),
+        "asset_counts_by_criticality": coverage.get("by_criticality", {}),
         "finding_counts_by_role": finding_counts_by_role,
         "finding_counts_by_criticality": finding_counts_by_criticality,
         "finding_counts_by_site": finding_counts_by_site,
         "finding_counts_by_business_unit": finding_counts_by_business_unit,
         "remoting_failures": dict(sorted(remoting_failures.items())),
+        "last_evidence_source_counts": dict(sorted(last_evidence_source_counts.items())),
+        "coverage_gaps": coverage_gaps,
+        "assessment_warnings": assessment_warnings if isinstance(assessment_warnings, list) else [],
+        "discovery_sources": assessment_plan.get("discovery_sources", []) if isinstance(assessment_plan, dict) else [],
         "top_repeated_findings": top_repeated[:10],
         "top_repeated_findings_on_critical_assets": top_repeated_critical[:10],
     }
@@ -255,3 +268,27 @@ def _highest_criticality(values: list[str]) -> str:
             highest = value
             highest_rank = current_rank
     return highest
+
+
+def _coverage_gaps(coverage: dict[str, object]) -> list[str]:
+    gaps: list[str] = []
+    total_assets = int(coverage.get("total_assets", 0) or 0)
+    assessed = int(coverage.get("assessed", 0) or 0)
+    partial = int(coverage.get("partial", 0) or 0)
+    unreachable = int(coverage.get("unreachable", 0) or 0)
+    discovery_only = int(coverage.get("discovery_only", 0) or 0)
+    imported_only = int(coverage.get("imported_evidence_only", 0) or 0)
+    if total_assets == 0:
+        gaps.append("No in-scope assets were tracked. Scope or discovery inputs may be invalid or empty.")
+        return gaps
+    if assessed == 0 and discovery_only:
+        gaps.append("Coverage is discovery-only. No remote or direct host validation succeeded for estate assets.")
+    elif discovery_only >= max(1, assessed):
+        gaps.append("Coverage is discovery-heavy. Many assets were identified but not directly validated.")
+    if partial:
+        gaps.append("Some assets returned only partial evidence. Validate connector reach, privilege, and host readiness.")
+    if unreachable:
+        gaps.append("Some assets were unreachable. Estate coverage is limited by remoting or path availability.")
+    if imported_only:
+        gaps.append("Some assets rely only on imported evidence and were not directly validated by the runner.")
+    return gaps

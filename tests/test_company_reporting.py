@@ -35,6 +35,7 @@ def test_company_reporting_helpers_render_coverage_and_host_appendix(tmp_path: P
                     "evidence_summary": "server-a, server-b",
                 }
             ],
+            "coverage_gaps": ["Coverage is discovery-heavy."],
         },
     )
 
@@ -44,7 +45,8 @@ def test_company_reporting_helpers_render_coverage_and_host_appendix(tmp_path: P
     assert coverage_rows[0] == ["Site", "Assessed", "Partial", "Unreachable", "Discovery-only", "Imported-evidence-only"]
     assert any("server-a" in row[0] for row in appendix_rows[1:])
     assert any("server" in row[2] for row in appendix_rows[1:])
-    assert any("discovery_only" in row[6] for row in appendix_rows[1:])
+    assert any("discovery_only" in row[5] for row in appendix_rows[1:])
+    assert appendix_rows[0][6] == "Last Evidence"
 
 
 def _intake() -> AssessmentIntake:

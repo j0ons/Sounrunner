@@ -23,6 +23,15 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
         "scanner_sources",
         [{"source": "nessus_api", "path": "evidence/nessus_export.nessus.enc"}],
     )
+    session.database.set_metadata(
+        "assessment_plan",
+        {
+            "discovery_sources": [
+                {"source": "nmap_discovery", "status": "active", "reason": "configured"}
+            ]
+        },
+    )
+    session.database.set_metadata("assessment_warnings", ["Remote Windows collection not configured."])
     session.crypto.write_text(
         session.manifest_path,
         json.dumps(
@@ -44,6 +53,8 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
     assert appendix["manifest_entry_count"] == 1
     assert "smtp" in str(appendix["callback_summary"])
     assert "nessus_api" in str(appendix["import_sources"])
+    assert appendix["assessment_warnings"]
+    assert appendix["discovery_sources"]
 
 
 def _finding() -> Finding:

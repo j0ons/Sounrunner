@@ -16,6 +16,7 @@ from app.core.models import AssessmentResult, Finding, ModuleResult
 from app.core.session import AssessmentSession
 from app.engine.aggregation import estate_summary, generate_aggregate_findings
 from app.engine.correlation import correlate_findings
+from app.engine.planner import AssessmentPlan
 from app.engine.risk import score_finding
 from app.export.bundle import BundleExporter
 from app.profiling.environment import EnvironmentProfile, EnvironmentProfiler
@@ -106,6 +107,23 @@ def run_modules(
         session.database.insert_findings(result.findings)
         findings.extend(result.findings)
     return findings
+
+
+def record_planned_skips(
+    *,
+    session: AssessmentSession,
+    plan: AssessmentPlan,
+) -> None:
+    """Persist skipped/not-configured modules so reporting is explicit."""
+
+    for entry in plan.skipped_modules():
+        session.database.upsert_module_status(
+            ModuleResult(
+                module_name=entry.module_name,
+                status="skipped",
+                detail=entry.reason,
+            ).to_status()
+        )
 
 
 def run_module_safe(session: AssessmentSession, ui: ConsoleUi, module: object) -> ModuleResult:

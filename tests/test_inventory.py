@@ -60,6 +60,12 @@ def test_inventory_records_local_and_discovered_assets(tmp_path: Path) -> None:
 
     assert any(asset.asset_id == local_asset.asset_id and asset.assessment_status == "assessed" for asset in assets)
     assert any(asset.asset_id == discovered.asset_id and asset.collector_status == "partial" for asset in assets)
+    assert any(
+        asset.asset_id == discovered.asset_id
+        and "nmap" in asset.discovery_sources
+        and asset.last_successful_evidence_source == "nmap"
+        for asset in assets
+    )
     assert coverage["total_assets"] == 2
     assert coverage["assessed"] == 1
     assert coverage["partial"] == 1

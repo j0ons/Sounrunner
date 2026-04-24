@@ -89,15 +89,22 @@ class LocalDatabase:
         }
 
     def upsert_asset(self, payload: dict[str, Any]) -> None:
+        discovery_sources = payload.get("discovery_sources")
+        if discovery_sources is None:
+            discovery_sources_json = payload.get("discovery_sources_json", "[]")
+        else:
+            discovery_sources_json = json.dumps(discovery_sources)
         self.connection.execute(
             """
             INSERT INTO assets(
                 asset_id, hostname, fqdn, ip_address, mac_address, os_family, os_guess,
                 asset_type, asset_role, role_source, criticality, criticality_source,
                 subnet_label, site_label, business_unit, directory_site, directory_ou,
-                discovery_source, first_seen, last_seen, assessment_status, collector_status, error_state
+                discovery_source, discovery_sources_json, first_seen, last_seen,
+                last_successful_evidence_source, assessment_status, collector_status,
+                remoting_eligible, remoting_eligibility_reason, error_state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(asset_id) DO UPDATE SET
                 hostname=excluded.hostname,
                 fqdn=excluded.fqdn,
@@ -116,9 +123,13 @@ class LocalDatabase:
                 directory_site=excluded.directory_site,
                 directory_ou=excluded.directory_ou,
                 discovery_source=excluded.discovery_source,
+                discovery_sources_json=excluded.discovery_sources_json,
                 last_seen=excluded.last_seen,
+                last_successful_evidence_source=excluded.last_successful_evidence_source,
                 assessment_status=excluded.assessment_status,
                 collector_status=excluded.collector_status,
+                remoting_eligible=excluded.remoting_eligible,
+                remoting_eligibility_reason=excluded.remoting_eligibility_reason,
                 error_state=excluded.error_state
             """,
             (
@@ -140,10 +151,14 @@ class LocalDatabase:
                 payload.get("directory_site", ""),
                 payload.get("directory_ou", ""),
                 payload.get("discovery_source", ""),
+                discovery_sources_json,
                 payload.get("first_seen", ""),
                 payload.get("last_seen", ""),
+                payload.get("last_successful_evidence_source", ""),
                 payload.get("assessment_status", ""),
                 payload.get("collector_status", ""),
+                1 if payload.get("remoting_eligible") else 0,
+                payload.get("remoting_eligibility_reason", ""),
                 payload.get("error_state", ""),
             ),
         )
@@ -492,10 +507,14 @@ class LocalDatabase:
                 directory_site TEXT NOT NULL DEFAULT '',
                 directory_ou TEXT NOT NULL DEFAULT '',
                 discovery_source TEXT NOT NULL DEFAULT '',
+                discovery_sources_json TEXT NOT NULL DEFAULT '[]',
                 first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_successful_evidence_source TEXT NOT NULL DEFAULT '',
                 assessment_status TEXT NOT NULL DEFAULT 'discovery_only',
                 collector_status TEXT NOT NULL DEFAULT 'not_started',
+                remoting_eligible INTEGER NOT NULL DEFAULT 0,
+                remoting_eligibility_reason TEXT NOT NULL DEFAULT '',
                 error_state TEXT NOT NULL DEFAULT ''
             );
 
@@ -569,6 +588,10 @@ class LocalDatabase:
             "criticality_source": "TEXT NOT NULL DEFAULT 'default'",
             "directory_site": "TEXT NOT NULL DEFAULT ''",
             "directory_ou": "TEXT NOT NULL DEFAULT ''",
+            "discovery_sources_json": "TEXT NOT NULL DEFAULT '[]'",
+            "last_successful_evidence_source": "TEXT NOT NULL DEFAULT ''",
+            "remoting_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "remoting_eligibility_reason": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in columns.items():
             if name not in existing:

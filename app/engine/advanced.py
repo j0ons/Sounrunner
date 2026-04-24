@@ -9,9 +9,15 @@ from app.core.config import AppConfig
 from app.core.inventory import AssetInventory
 from app.core.models import AssessmentResult
 from app.core.session import AssessmentSession
-from app.engine.common import collect_evidence_context, finalize_assessment, run_modules
+from app.engine.common import (
+    collect_evidence_context,
+    finalize_assessment,
+    record_planned_skips,
+    run_modules,
+)
 from app.engine.orchestrator import EstateAssessmentModule
-from app.engine.standard import ScannerImportModule, _standard_activation_plan
+from app.engine.planner import build_assessment_plan, persist_assessment_plan
+from app.engine.standard import ScannerImportModule
 from app.modules.active_directory import ActiveDirectoryModule
 from app.modules.advanced_guided import AdvancedGuidedModule
 from app.modules.backup_readiness import BackupReadinessModule
@@ -51,42 +57,44 @@ class AdvancedPackageRunner:
         advanced_config = copy.copy(self.config)
         advanced_config.nmap = copy.copy(self.config.nmap)
         advanced_config.nmap.top_ports = self.config.standard.extended_nmap_top_ports
-        modules = [
-            IdentityModule(self.session, context.profile, context.windows_evidence),
-            EndpointModule(self.session, context.profile, context.windows_evidence),
-            NetworkExposureLiteModule(
+        plan = build_assessment_plan(session=self.session, config=self.config, package="advanced")
+        persist_assessment_plan(self.session, plan)
+        self.ui.print_module_activation_plan(plan.module_activation_plan())
+        for warning in plan.warnings:
+            self.ui.warn(warning)
+        record_planned_skips(session=self.session, plan=plan)
+
+        candidate_modules = {
+            "identity": IdentityModule(self.session, context.profile, context.windows_evidence),
+            "endpoint": EndpointModule(self.session, context.profile, context.windows_evidence),
+            "network_lite": NetworkExposureLiteModule(
                 self.session,
                 context.profile,
                 advanced_config,
                 context.windows_evidence,
                 run_scope_scan=False,
             ),
-            EmailSecurityModule(self.session, context.profile, self.config.email_security),
-            M365EntraModule(self.session, self.config.m365_entra),
-            ScannerImportModule(self.session, self.config),
-            FirewallVpnImportModule(self.session, self.config),
-            BackupPlatformImportModule(self.session, self.config),
-            ActiveDirectoryModule(self.session, self.config),
-            EstateAssessmentModule(self.session, self.config, package="advanced"),
-            BackupReadinessModule(self.session, context.windows_evidence),
-            PrivilegedAccessModule(self.session, context.windows_evidence),
-            IncidentReadinessModule(self.session, context.windows_evidence),
-            RansomwareReadinessModule(
+            "email_security": EmailSecurityModule(self.session, context.profile, self.config.email_security),
+            "m365_entra": M365EntraModule(self.session, self.config.m365_entra),
+            "scanner_imports": ScannerImportModule(self.session, self.config),
+            "firewall_vpn_import": FirewallVpnImportModule(self.session, self.config),
+            "backup_platform_import": BackupPlatformImportModule(self.session, self.config),
+            "active_directory": ActiveDirectoryModule(self.session, self.config),
+            "estate_orchestration": EstateAssessmentModule(self.session, self.config, package="advanced"),
+            "backup_readiness": BackupReadinessModule(self.session, context.windows_evidence),
+            "privileged_access": PrivilegedAccessModule(self.session, context.windows_evidence),
+            "incident_readiness": IncidentReadinessModule(self.session, context.windows_evidence),
+            "ransomware_readiness": RansomwareReadinessModule(
                 self.session,
                 warn_threshold=self.config.standard.ransomware_score_warn_threshold,
             ),
-            AdvancedGuidedModule(self.session),
+            "advanced_guided": AdvancedGuidedModule(self.session),
+        }
+        modules = [
+            candidate_modules[entry.module_name]
+            for entry in plan.modules
+            if entry.should_run and entry.module_name in candidate_modules
         ]
-        activation_plan = [
-            *_standard_activation_plan(self.session, self.config),
-            {
-                "module_name": "advanced_guided",
-                "activation": "active",
-                "reason": "Advanced adds guided planning and full-assessment outputs on top of Standard evidence.",
-            },
-        ]
-        self.session.database.set_metadata("module_activation_plan", activation_plan)
-        self.ui.print_module_activation_plan(activation_plan)
         run_modules(config=self.config, session=self.session, ui=self.ui, modules=modules)
         return finalize_assessment(
             config=self.config,

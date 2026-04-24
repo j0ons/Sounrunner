@@ -70,6 +70,8 @@ def test_estate_orchestrator_tracks_per_host_status(tmp_path: Path, monkeypatch)
     assert coverage["assessed"] == 1
     assert coverage["partial"] == 1
     assert any(status["module_name"] == "remote_windows_collection" for status in asset_statuses)
+    inventory_assets = session.database.get_metadata("inventory_assets", [])
+    assert any(item["remoting_eligible"] for item in inventory_assets)
 
 
 def test_estate_orchestrator_uses_imported_assets_for_remote_collection(tmp_path: Path, monkeypatch) -> None:
@@ -115,6 +117,10 @@ def test_estate_orchestrator_uses_imported_assets_for_remote_collection(tmp_path
     assert result.status == "complete"
     assert coverage["assessed"] == 1
     assert any(item["module_name"] == "remote_windows_collection" and item["status"] == "complete" for item in status)
+    refreshed = inventory.find_asset(imported.asset_id)
+    assert refreshed is not None
+    assert refreshed.last_successful_evidence_source == "remote_windows_collection"
+    assert refreshed.remoting_eligible is True
 
 
 def _intake() -> AssessmentIntake:
