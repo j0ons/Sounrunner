@@ -197,6 +197,7 @@ class AssessmentDefaults:
     cloud_tenants: list[str] = field(default_factory=list)
     scanner_sources: list[str] = field(default_factory=list)
     client_domain: str = ""
+    auto_scope_allowed_adapter_keywords: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

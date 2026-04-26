@@ -155,6 +155,7 @@ class ConsoleUi:
                 for item in warnings:
                     warning_table.add_row(item)
                 self.console.print(warning_table)
+            self._print_auto_scope_context(context)
             return
         lines = [
             "Run Contract",
@@ -167,7 +168,32 @@ class ConsoleUi:
             ]
         for item in warnings:
             lines.append(f"Warning: {item}")
+        lines.extend(_auto_scope_lines(context))
         self._print("\n".join(lines), style="white")
+
+    def _print_auto_scope_context(self, context: dict[str, object]) -> None:
+        diagnostics = context.get("adapter_diagnostics", [])
+        if not diagnostics or not isinstance(diagnostics, list) or not self.console or not Table:
+            return
+        table = Table(title="Auto-Scope Adapter Decisions", header_style="bold bright_cyan")
+        table.add_column("Adapter")
+        table.add_column("IPv4")
+        table.add_column("Subnet")
+        table.add_column("Decision")
+        table.add_column("Reason")
+        table.add_column("Confidence")
+        for item in diagnostics[:12]:
+            if not isinstance(item, dict):
+                continue
+            table.add_row(
+                str(item.get("name", "")),
+                str(item.get("ip_address", "")),
+                str(item.get("subnet", "")),
+                str(item.get("decision", "")),
+                str(item.get("reason", "")),
+                str(item.get("confidence_score", "")),
+            )
+        self.console.print(table)
 
     def print_module_activation_plan(self, plan: list[dict[str, str]]) -> None:
         if not plan:
@@ -637,3 +663,24 @@ def _safe_business_unit(value: str, *, ui: ConsoleUi) -> str:
         ui.error(error)
         return ""
     return value
+
+
+def _auto_scope_lines(context: dict[str, object]) -> list[str]:
+    diagnostics = context.get("adapter_diagnostics", [])
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return []
+    lines = ["Auto-scope adapter decisions:"]
+    for item in diagnostics[:12]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "- {name} {ip}/{prefix} -> {subnet}: {decision} ({reason})".format(
+                name=item.get("name", ""),
+                ip=item.get("ip_address", ""),
+                prefix=item.get("prefix_length", ""),
+                subnet=item.get("subnet", ""),
+                decision=item.get("decision", ""),
+                reason=f"{item.get('reason', '')}; confidence={item.get('confidence_score', '')}",
+            )
+        )
+    return lines

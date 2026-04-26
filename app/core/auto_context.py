@@ -25,6 +25,15 @@ class DetectedInterface:
     subnet: str
     gateway: str = ""
     dns_suffix: str = ""
+    interface_index: int = 0
+    description: str = ""
+    status: str = ""
+    adapter_type: str = ""
+    has_default_gateway: bool = False
+    is_primary_route: bool = False
+    route_metric: int = 999999
+    interface_metric: int = 999999
+    confidence_score: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -50,11 +59,49 @@ class AutoEnterpriseContext:
     email_domain: str
     ad_domain: str
     warnings: list[str] = field(default_factory=list)
+    adapter_diagnostics: list[dict[str, object]] = field(default_factory=list)
+    selected_interface_alias: str = ""
+    selected_ip: str = ""
+    selected_prefix_length: int = 0
+    selected_cidr: str = ""
+    auto_scope_confidence: int = 0
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["interfaces"] = [item.to_dict() for item in self.interfaces]
         return payload
+
+
+RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+VIRTUAL_ADAPTER_KEYWORDS = (
+    "docker",
+    "wsl",
+    "hyper-v",
+    "vethernet",
+    "vmware",
+    "virtualbox",
+    "tailscale",
+    "zerotier",
+    "vpn",
+    "wireguard",
+    "openvpn",
+    "tap",
+    "tun",
+    "loopback",
+    "default switch",
+    "host-only",
+    "host only",
+    "nat-only",
+    "nat only",
+    "vmnet",
+)
+
+DOWN_STATUS_VALUES = {"down", "disconnected", "disabled", "not present", "notpresent"}
 
 
 def detect_enterprise_context(config: AppConfig | None = None) -> AutoEnterpriseContext:
@@ -67,25 +114,20 @@ def detect_enterprise_context(config: AppConfig | None = None) -> AutoEnterprise
     domain_joined = False
     domain_name = _domain_from_fqdn(fqdn)
     dns_suffixes: list[str] = []
-    interfaces: list[DetectedInterface] = []
+    detected_interfaces: list[DetectedInterface] = []
 
     if is_windows():
         windows_context = _detect_windows_context()
         domain_joined = windows_context["domain_joined"]
         domain_name = windows_context["domain_name"] or domain_name
         dns_suffixes = windows_context["dns_suffixes"]
-        interfaces = windows_context["interfaces"]
+        detected_interfaces = windows_context["interfaces"]
     else:
-        interfaces = _detect_non_windows_interfaces()
+        detected_interfaces = _detect_non_windows_interfaces()
         dns_suffixes = [domain_name] if domain_name else []
 
-    private_subnets = _unique_sorted(
-        [
-            item.subnet
-            for item in interfaces
-            if _is_private_unicast(item.ip_address)
-        ]
-    )
+    interfaces, adapter_diagnostics = _select_auto_scope_interfaces(detected_interfaces, config)
+    private_subnets = _unique_preserve_order([item.subnet for item in interfaces])
     configured_scopes = _configured_scopes(config)
     warnings: list[str] = []
     if configured_scopes:
@@ -105,6 +147,7 @@ def detect_enterprise_context(config: AppConfig | None = None) -> AutoEnterprise
     email_domain = _public_email_domain(config, domain_name, dns_suffixes)
     ad_domain = _ad_domain(config, domain_joined, domain_name)
     business_unit = config.assessment.business_unit if config else ""
+    selected_interface = interfaces[0] if interfaces else None
 
     return AutoEnterpriseContext(
         hostname=hostname,
@@ -123,6 +166,12 @@ def detect_enterprise_context(config: AppConfig | None = None) -> AutoEnterprise
         email_domain=email_domain,
         ad_domain=ad_domain,
         warnings=warnings,
+        adapter_diagnostics=adapter_diagnostics,
+        selected_interface_alias=selected_interface.name if selected_interface else "",
+        selected_ip=selected_interface.ip_address if selected_interface else "",
+        selected_prefix_length=selected_interface.prefix_length if selected_interface else 0,
+        selected_cidr=selected_interface.subnet if selected_interface else "",
+        auto_scope_confidence=selected_interface.confidence_score if selected_interface else 0,
     )
 
 
@@ -152,7 +201,43 @@ def _detect_windows_context() -> dict[str, object]:
         timeout_seconds=20,
     )
     net_info, _ = powershell_json(
-        "Get-NetIPConfiguration | Select-Object InterfaceAlias,IPv4Address,IPv4DefaultGateway,DnsSuffix",
+        """
+$routes = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
+    Sort-Object RouteMetric, InterfaceMetric
+$primary = $routes | Select-Object -First 1
+$adapters = @{}
+Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object {
+    $adapters[[int]$_.ifIndex] = $_
+}
+Get-NetIPConfiguration -ErrorAction SilentlyContinue | ForEach-Object {
+    $cfg = $_
+    $adapter = $adapters[[int]$cfg.InterfaceIndex]
+    $route = $routes | Where-Object { $_.InterfaceIndex -eq $cfg.InterfaceIndex } | Select-Object -First 1
+    $gateway = ''
+    if ($cfg.IPv4DefaultGateway -and $cfg.IPv4DefaultGateway.NextHop) {
+        $gateway = [string]$cfg.IPv4DefaultGateway.NextHop
+    }
+    foreach ($address in @($cfg.IPv4Address)) {
+        if (-not $address.IPAddress) { continue }
+        [pscustomobject]@{
+            InterfaceAlias = [string]$cfg.InterfaceAlias
+            InterfaceIndex = [int]$cfg.InterfaceIndex
+            InterfaceDescription = if ($adapter) { [string]$adapter.InterfaceDescription } else { '' }
+            Status = if ($adapter) { [string]$adapter.Status } else { '' }
+            AdapterType = if ($adapter) { [string]$adapter.MediaType } else { '' }
+            IPv4Address = [string]$address.IPAddress
+            PrefixLength = [int]$address.PrefixLength
+            IPv4DefaultGateway = $gateway
+            DnsSuffix = [string]$cfg.DnsSuffix
+            HasDefaultGateway = [bool]$gateway
+            IsPrimaryRoute = [bool]($primary -and $primary.InterfaceIndex -eq $cfg.InterfaceIndex)
+            RouteMetric = if ($route) { [int]$route.RouteMetric } else { 999999 }
+            InterfaceMetric = if ($route) { [int]$route.InterfaceMetric } else { 999999 }
+        }
+    }
+}
+        """,
         timeout_seconds=20,
     )
     domain_joined = bool(computer_info.get("PartOfDomain", False))
@@ -184,7 +269,41 @@ def _interfaces_from_windows_payload(payload: dict[str, object]) -> list[Detecte
         name = str(item.get("InterfaceAlias", "") or "unknown")
         gateway = _gateway_value(item.get("IPv4DefaultGateway"))
         suffix = str(item.get("DnsSuffix", "") or "").strip()
-        for ipv4 in _ensure_list(item.get("IPv4Address")):
+        description = str(item.get("InterfaceDescription", "") or "").strip()
+        status = str(item.get("Status", "") or "").strip()
+        adapter_type = str(item.get("AdapterType", "") or "").strip()
+        interface_index = _safe_int(item.get("InterfaceIndex"))
+        has_gateway = bool(item.get("HasDefaultGateway")) or bool(gateway)
+        is_primary = bool(item.get("IsPrimaryRoute"))
+        route_metric = _safe_int(item.get("RouteMetric"), default=999999)
+        interface_metric = _safe_int(item.get("InterfaceMetric"), default=999999)
+        raw_ipv4 = item.get("IPv4Address")
+        if isinstance(raw_ipv4, str):
+            address = raw_ipv4.strip()
+            prefix = _safe_int(item.get("PrefixLength"))
+            subnet = _subnet(address, prefix)
+            if subnet:
+                interfaces.append(
+                    DetectedInterface(
+                        name=name,
+                        ip_address=address,
+                        prefix_length=prefix,
+                        subnet=subnet,
+                        gateway=gateway,
+                        dns_suffix=suffix,
+                        interface_index=interface_index,
+                        description=description,
+                        status=status,
+                        adapter_type=adapter_type,
+                        has_default_gateway=has_gateway,
+                        is_primary_route=is_primary,
+                        route_metric=route_metric,
+                        interface_metric=interface_metric,
+                        confidence_score=0,
+                    )
+                )
+            continue
+        for ipv4 in _ensure_list(raw_ipv4):
             if not isinstance(ipv4, dict):
                 continue
             address = str(ipv4.get("IPAddress", "") or "").strip()
@@ -199,6 +318,15 @@ def _interfaces_from_windows_payload(payload: dict[str, object]) -> list[Detecte
                         subnet=subnet,
                         gateway=gateway,
                         dns_suffix=suffix,
+                        interface_index=interface_index,
+                        description=description,
+                        status=status,
+                        adapter_type=adapter_type,
+                        has_default_gateway=has_gateway,
+                        is_primary_route=is_primary,
+                        route_metric=route_metric,
+                        interface_metric=interface_metric,
+                        confidence_score=0,
                     )
                 )
     return interfaces
@@ -219,6 +347,7 @@ def _interfaces_from_ip_addr() -> list[DetectedInterface]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("ifname", "") or "unknown")
+        status = str(item.get("operstate", "") or "").strip()
         for addr in item.get("addr_info", []) or []:
             if not isinstance(addr, dict) or addr.get("family") != "inet":
                 continue
@@ -226,7 +355,15 @@ def _interfaces_from_ip_addr() -> list[DetectedInterface]:
             prefix = _safe_int(addr.get("prefixlen"))
             subnet = _subnet(address, prefix)
             if subnet:
-                interfaces.append(DetectedInterface(name=name, ip_address=address, prefix_length=prefix, subnet=subnet))
+                interfaces.append(
+                    DetectedInterface(
+                        name=name,
+                        ip_address=address,
+                        prefix_length=prefix,
+                        subnet=subnet,
+                        status=status,
+                    )
+                )
     return interfaces
 
 
@@ -265,6 +402,159 @@ def _interfaces_from_ifconfig() -> list[DetectedInterface]:
     return interfaces
 
 
+def _select_auto_scope_interfaces(
+    interfaces: list[DetectedInterface],
+    config: AppConfig | None,
+) -> tuple[list[DetectedInterface], list[dict[str, object]]]:
+    allowed_keywords = _allowed_adapter_keywords(config)
+    candidates: list[DetectedInterface] = []
+    diagnostics: list[dict[str, object]] = []
+    for interface in interfaces:
+        reason = _ignore_reason(interface, allowed_keywords)
+        if reason:
+            diagnostics.append(_adapter_diagnostic(interface, selected=False, reason=reason))
+            continue
+        interface.confidence_score = _confidence_score(interface)
+        candidates.append(interface)
+    candidates.sort(key=_interface_priority)
+    selected = candidates[:1]
+    for interface in candidates:
+        is_selected = bool(selected and interface is selected[0])
+        reason = (
+            "selected primary/default-route company LAN candidate"
+            if is_selected
+            else "valid private candidate but lower confidence than selected interface"
+        )
+        decision = "selected" if is_selected else "candidate"
+        diagnostics.append(_adapter_diagnostic(interface, decision=decision, reason=reason))
+    return selected, diagnostics
+
+
+def _ignore_reason(interface: DetectedInterface, allowed_keywords: list[str]) -> str:
+    status = interface.status.strip().lower()
+    if status in DOWN_STATUS_VALUES:
+        return f"adapter status is {interface.status}"
+    try:
+        ip = ipaddress.ip_address(interface.ip_address)
+    except ValueError:
+        return "invalid IPv4 address"
+    if ip.version != 4:
+        return "not IPv4"
+    if ip.is_loopback:
+        return "loopback"
+    if ip.is_link_local:
+        return "APIPA/link-local"
+    if not _is_rfc1918_private(ip):
+        return "not RFC1918 private"
+    if not interface.subnet:
+        return "missing CIDR subnet"
+    if _is_excluded_adapter(interface, allowed_keywords):
+        return "virtual/VPN adapter"
+    return ""
+
+
+def _is_excluded_adapter(interface: DetectedInterface, allowed_keywords: list[str]) -> bool:
+    haystack = " ".join(
+        [
+            interface.name,
+            interface.description,
+            interface.adapter_type,
+        ]
+    ).lower()
+    if any(keyword.lower() in haystack for keyword in allowed_keywords):
+        return False
+    return any(keyword in haystack for keyword in VIRTUAL_ADAPTER_KEYWORDS)
+
+
+def _looks_physical_lan(interface: DetectedInterface) -> bool:
+    haystack = " ".join([interface.name, interface.description, interface.adapter_type]).lower()
+    return any(
+        keyword in haystack
+        for keyword in [
+            "ethernet",
+            "wi-fi",
+            "wifi",
+            "wireless",
+            "802.11",
+            "intel",
+            "realtek",
+            "broadcom",
+            "qualcomm",
+        ]
+    )
+
+
+def _allowed_adapter_keywords(config: AppConfig | None) -> list[str]:
+    if not config:
+        return []
+    return [
+        str(item).strip().lower()
+        for item in config.assessment.auto_scope_allowed_adapter_keywords
+        if str(item).strip()
+    ]
+
+
+def _interface_priority(interface: DetectedInterface) -> tuple[int, int, int, int, str]:
+    return (
+        -interface.confidence_score,
+        0 if interface.is_primary_route else 1,
+        0 if interface.has_default_gateway or interface.gateway else 1,
+        interface.route_metric,
+        interface.interface_metric,
+        interface.name.lower(),
+    )
+
+
+def _confidence_score(interface: DetectedInterface) -> int:
+    score = 20
+    if interface.is_primary_route:
+        score += 55
+    if interface.has_default_gateway or interface.gateway:
+        score += 25
+    if interface.status.strip().lower() == "up":
+        score += 10
+    if _looks_physical_lan(interface):
+        score += 10
+    if interface.dns_suffix.strip():
+        score += 5
+    if interface.route_metric < 999999:
+        score += max(0, 5 - min(5, interface.route_metric // 20))
+    return score
+
+
+def _adapter_diagnostic(
+    interface: DetectedInterface,
+    *,
+    decision: str = "",
+    selected: bool | None = None,
+    reason: str,
+) -> dict[str, object]:
+    if not decision:
+        decision = "selected" if selected else "ignored"
+    return {
+        "name": interface.name,
+        "description": interface.description,
+        "ip_address": interface.ip_address,
+        "prefix_length": interface.prefix_length,
+        "subnet": interface.subnet,
+        "gateway": interface.gateway,
+        "status": interface.status,
+        "is_primary_route": interface.is_primary_route,
+        "route_metric": interface.route_metric,
+        "interface_metric": interface.interface_metric,
+        "confidence_score": interface.confidence_score,
+        "decision": decision,
+        "reason": reason,
+    }
+
+
+def _selected_order(selected: list[DetectedInterface], subnet: str, name: str) -> int:
+    for index, interface in enumerate(selected, start=1):
+        if interface.subnet == subnet and interface.name == name:
+            return index
+    return 0
+
+
 def _configured_scopes(config: AppConfig | None) -> list[str]:
     if not config:
         return []
@@ -279,7 +569,13 @@ def _is_private_unicast(address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
-    return bool(ip.version == 4 and ip.is_private and not ip.is_loopback and not ip.is_link_local)
+    return bool(ip.version == 4 and _is_rfc1918_private(ip) and not ip.is_loopback and not ip.is_link_local)
+
+
+def _is_rfc1918_private(ip: ipaddress._BaseAddress) -> bool:
+    if ip.version != 4:
+        return False
+    return any(ip in network for network in RFC1918_NETWORKS)
 
 
 def _subnet(address: str, prefix: int) -> str:
@@ -321,11 +617,11 @@ def _ensure_list(value: object) -> list[object]:
     return [value]
 
 
-def _safe_int(value: object) -> int:
+def _safe_int(value: object, *, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return 0
+        return default
 
 
 def _domain_from_fqdn(fqdn: str) -> str:
@@ -373,3 +669,46 @@ def _ad_domain(config: AppConfig | None, domain_joined: bool, domain_name: str) 
 
 def _unique_sorted(values: list[str]) -> list[str]:
     return sorted({item.strip() for item in values if item and item.strip()})
+
+
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            output.append(cleaned)
+    return output
+
+
+def auto_scope_debug_summary(context: AutoEnterpriseContext) -> str:
+    """Return one-line operator debug context for preflight output."""
+
+    selected = [
+        f"{item.get('name')} {item.get('ip_address')}/{item.get('prefix_length')} -> "
+        f"{item.get('subnet')} confidence={item.get('confidence_score', 0)}"
+        for item in context.adapter_diagnostics
+        if item.get("decision") == "selected"
+    ]
+    candidates = [
+        f"{item.get('name')} {item.get('ip_address')}: {item.get('reason')} "
+        f"confidence={item.get('confidence_score', 0)}"
+        for item in context.adapter_diagnostics
+        if item.get("decision") == "candidate"
+    ]
+    ignored = [
+        f"{item.get('name')} {item.get('ip_address')}: {item.get('reason')}"
+        for item in context.adapter_diagnostics
+        if item.get("decision") == "ignored"
+    ]
+    return (
+        f"scope_source={context.scope_source}; selected_scope={context.default_scope}; "
+        f"selected_interface={context.selected_interface_alias}; selected_ip={context.selected_ip}; "
+        f"selected_prefix={context.selected_prefix_length}; selected_cidr={context.selected_cidr}; "
+        f"confidence={context.auto_scope_confidence}; "
+        f"detected_adapters={len(context.adapter_diagnostics)}; "
+        f"selected_adapters={'; '.join(selected) if selected else 'none'}; "
+        f"candidate_adapters={'; '.join(candidates[:5]) if candidates else 'none'}; "
+        f"ignored_adapters={'; '.join(ignored[:8]) if ignored else 'none'}"
+    )

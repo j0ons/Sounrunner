@@ -253,10 +253,14 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
 Standard and Advanced determine scope in this order:
 
 1. `assessment.approved_scopes` or `assessment.approved_scope` from config.
-2. Directly connected private RFC1918 IPv4 subnets from active local interfaces.
+2. The highest-confidence directly connected private RFC1918 IPv4 subnet from active local interfaces, with the default IPv4 route interface preferred.
 3. `local-host-only` fallback when no private connected subnet exists.
 
 The runner records the scope source as `config_scope`, `auto_detected_local_subnets`, or `localhost_only_fallback`. It does not scan arbitrary routed networks just because they are reachable. Broader routed networks must be explicitly approved in config.
+
+Auto-scope ignores loopback, APIPA, CGNAT/Tailscale, Docker, WSL, Hyper-V internal, VMware, VirtualBox, Default Switch, host-only, NAT-only, ZeroTier, and VPN-style adapters by default. Use `assessment.auto_scope_allowed_adapter_keywords` only when a known lab adapter is explicitly approved for auto-scope.
+
+Preflight includes an `auto_scope_detection` row showing detected adapters, ignored adapters with reasons, selected interface, selected IP/prefix, selected CIDR, confidence score, and scope source.
 
 Detected enterprise context includes hostname, FQDN, domain join state, DNS suffixes, local site heuristic, inferred AD domain, inferred email domain, and directly connected private subnets.
 

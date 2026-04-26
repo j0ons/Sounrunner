@@ -13,6 +13,7 @@ from typing import Any
 from app.core.config import AppConfig
 from app.collectors.shell import run_command
 from app.collectors.windows import detect_windows_admin, is_windows, powershell_available, run_powershell
+from app.core.auto_context import auto_scope_debug_summary, detect_enterprise_context
 from app.core.secrets import has_plaintext_secret_config, resolve_secret
 
 
@@ -76,6 +77,7 @@ def run_preflight(
     checks.append(_powershell_check())
     checks.append(_admin_context_check())
     checks.append(_nmap_check(config))
+    checks.append(_auto_scope_detection_check(config))
     checks.append(_secret_sources_check(config))
     checks.extend(_remote_windows_checks(config))
     checks.append(_estate_readiness_check(config))
@@ -228,6 +230,23 @@ def _nmap_check(config: AppConfig | None) -> PreflightCheck:
     )
 
 
+def _auto_scope_detection_check(config: AppConfig | None) -> PreflightCheck:
+    try:
+        context = detect_enterprise_context(config)
+    except Exception as exc:  # noqa: BLE001 - preflight must report discovery failures.
+        return PreflightCheck(
+            name="auto_scope_detection",
+            status="warning",
+            detail=f"Auto-scope detection failed: {exc}",
+        )
+    status = "warning" if context.scope_source == "localhost_only_fallback" else "ok"
+    return PreflightCheck(
+        name="auto_scope_detection",
+        status=status,
+        detail=auto_scope_debug_summary(context),
+    )
+
+
 def _callback_check(config: AppConfig | None) -> PreflightCheck:
     if not config or not config.callback.enabled:
         return PreflightCheck(
@@ -318,7 +337,10 @@ def _scope_defaults_check(config: AppConfig | None) -> PreflightCheck:
         return PreflightCheck(
             name="scope_defaults",
             status="skipped",
-            detail="No approved scope default is configured. Operator intake must provide scope.",
+            detail=(
+                "No approved scope default is configured. Standard/Advanced will rely on "
+                "auto-detected directly connected private subnets when available."
+            ),
         )
     return PreflightCheck(
         name="scope_defaults",
@@ -354,7 +376,10 @@ def _estate_readiness_check(config: AppConfig | None) -> PreflightCheck:
         return PreflightCheck(
             name="estate_readiness",
             status="warning",
-            detail="No approved scopes are configured. Standard/Advanced cannot run headless without an approved scope.",
+            detail=(
+                "No config-approved scopes are configured. Standard/Advanced will use auto-detected "
+                "directly connected private subnets when available; confirm authorization covers that LAN scope."
+            ),
         )
     if not connectors:
         return PreflightCheck(
