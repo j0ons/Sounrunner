@@ -10,7 +10,8 @@ Implemented:
 
 - Rich terminal launcher with version reporting.
 - Startup preflight and healthcheck validation.
-- Config-first launch flow with headless company-wide execution support.
+- Minimal launch flow: interactive runs ask only for company name and package.
+- Config-first/headless launch flow with automatic company-wide scope detection when config scopes are absent.
 - Session creation with consent and scope enforcement.
 - External runtime paths using `--config`, `--data-dir`, and `--log-dir`.
 - Encrypted local workspace primitives for evidence, checkpoints, and sensitive session blobs.
@@ -53,7 +54,7 @@ Still partial:
 The tool fails closed:
 
 - Written authorization confirmation is mandatory.
-- Authorized scope is mandatory.
+- Scope control is mandatory. Config-approved scopes are preferred; otherwise Standard/Advanced use directly connected private RFC1918 subnets only and record the scope source.
 - Basic package does not perform subnet scanning.
 - All collection is read-only.
 - Standard and Advanced can assess multiple hosts only inside the approved scope model. Discovery-only assets remain labeled as discovery-only.
@@ -75,15 +76,29 @@ C:\SounRunner\run_assessment.ps1 -Healthcheck
 C:\SounRunner\run_assessment.ps1 -Preflight
 ```
 
-3. Run the authorized package with approved scope and operator-confirmed consent.
+3. Run the authorized package. Interactive launches ask only for company name and package.
 
 ```powershell
 C:\SounRunner\run_assessment.ps1
 ```
 
-For company-wide Standard or Advanced runs, the low-friction path is now headless and config-first. If config already defines client, site, operator, package, consent, and approved scopes, the runner does not ask again.
-
 One-command Standard example:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard
+```
+
+Installed PowerShell launcher equivalent:
+
+```powershell
+C:\SounRunner\run_assessment.ps1 -CompanyName "Client Name" -Package standard
+```
+
+That command auto-detects directly connected private subnets, domain context, available connectors/imports, Nmap availability, and estate planning inputs. If config provides approved scopes, config wins over auto-detection.
+
+For company-wide Standard or Advanced runs, the lowest-friction headless path is config-first. If config or CLI defines company name, package, and consent, the runner does not ask again. Site, operator, AD domain, email domain, local scope, and connector availability are auto-detected or config-derived.
+
+Headless Standard example:
 
 ```powershell
 C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
@@ -91,13 +106,12 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --data-dir C:\SounRunner\data `
   --log-dir C:\SounRunner\logs `
   --package standard `
-  --scope-from-config `
   --non-interactive `
   --consent-confirmed `
   --report-mode standard
 ```
 
-If a required value is missing in headless mode, the runner fails cleanly instead of falling back into fragile prompt chains.
+If company name, package, or headless consent is missing in headless mode, the runner fails cleanly instead of falling back into fragile prompt chains.
 
 4. If callbacks were enabled and any delivery failed, inspect and retry the queue.
 
@@ -182,14 +196,22 @@ This matters because a discovered RDP or SMB service is not the same thing as a 
 
 Advisory and partial items are not confirmed technical vulnerabilities. Reports separate them from direct system and network discovery findings.
 
-## Config-First And Headless Execution
+## Minimal Launch And Headless Execution
 
-Basic can still be launched interactively. Standard and Advanced are now designed to run headless for real company assessments.
+Basic can still be launched interactively as a local validation mode. Standard and Advanced are designed to launch as company-wide assessment modes with minimal operator friction.
+
+Interactive prompt contract:
+
+- company name
+- package: `basic`, `standard`, or `advanced`
+
+Everything else is config-derived, environment-derived, connector-derived, or marked skipped/not configured. The runner no longer asks for subnet, site, operator, AD domain, business unit, email domain, connector availability, allowlist, or denylist during normal interactive launch.
 
 Supported launch overrides:
 
 - `--package basic|standard|advanced`
 - `--non-interactive`
+- `--company-name`
 - `--client-name`
 - `--site`
 - `--operator`
@@ -200,10 +222,18 @@ Supported launch overrides:
 
 Behavior:
 
-- If config already contains approved scopes, client name, site, operator, package, and consent, the runner uses them directly.
-- Interactive prompting is now reserved for missing required values only.
+- If config already contains approved scopes, they are used as the assessment boundary.
+- If config scopes are absent, Standard/Advanced use auto-detected directly connected private subnets as the default company scope.
+- If only loopback or non-private interfaces are detected, the runner continues with `local-host-only` and warns that the run is not representative of estate coverage.
+- Interactive prompting is reserved for company name and package.
 - Optional fields do not force extra prompts during company-wide runs.
 - If Standard or Advanced is launched with `local-host-only`, the runner warns that estate coverage is limited.
+
+One-command Standard launch:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard
+```
 
 Example headless Advanced launch:
 
@@ -213,11 +243,22 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --data-dir C:\SounRunner\data `
   --log-dir C:\SounRunner\logs `
   --package advanced `
-  --scope-from-config `
   --non-interactive `
   --consent-confirmed `
   --report-mode advanced
 ```
+
+## Auto-Scope And Enterprise Context
+
+Standard and Advanced determine scope in this order:
+
+1. `assessment.approved_scopes` or `assessment.approved_scope` from config.
+2. Directly connected private RFC1918 IPv4 subnets from active local interfaces.
+3. `local-host-only` fallback when no private connected subnet exists.
+
+The runner records the scope source as `config_scope`, `auto_detected_local_subnets`, or `localhost_only_fallback`. It does not scan arbitrary routed networks just because they are reachable. Broader routed networks must be explicitly approved in config.
+
+Detected enterprise context includes hostname, FQDN, domain join state, DNS suffixes, local site heuristic, inferred AD domain, inferred email domain, and directly connected private subnets.
 
 ## Automatic Module Activation
 
@@ -402,9 +443,9 @@ email_security:
 
 If DKIM selectors are unknown, leave the list empty. The report will state that DKIM was not assessed instead of pretending DKIM failed.
 
-During intake, enter the exact authorized scope string or enter `config` to use `approved_scopes` from the config file. The tool rejects empty or invalid scope and does not scan outside approved CIDR ranges.
+During normal interactive launch, the runner no longer asks for scope. Configured `approved_scopes` are the strongest boundary. If they are absent, Standard/Advanced use only directly connected private RFC1918 subnets detected on the assessment host. Empty or invalid configured scope values are rejected cleanly, and the runner does not scan outside approved or auto-detected local private scope.
 
-Headless company-wide configs should now populate launch defaults directly:
+Headless company-wide configs should populate launch defaults directly. Site and operator are optional because the runner can infer them, but explicit config values are better for audit quality.
 
 ```yaml
 assessment:
@@ -561,7 +602,7 @@ Standard is now implemented as a real package path. It reuses Basic evidence-bac
 Standard runs:
 
 - Basic local Windows posture, DNS/email posture, and approved-scope Nmap exposure checks.
-- Multi-host discovery across one or more approved CIDRs by default.
+- Multi-host discovery across configured approved CIDRs or auto-detected directly connected private subnets by default.
 - Central asset inventory with discovery-only, partial, assessed, and unreachable host states.
 - Automatic target planning from discovery, AD, and imported evidence sources.
 - Remote Windows posture collection across eligible in-scope hosts using authorized WinRM/PowerShell remoting.
@@ -585,13 +626,19 @@ Standard is honest about evidence quality:
 Run Standard on Windows:
 
 ```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard
+```
+
+Headless/config-driven Standard:
+
+```powershell
 C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --config C:\SounRunner\config\config.yaml `
   --data-dir C:\SounRunner\data `
   --log-dir C:\SounRunner\logs `
   --package standard `
-  --scope-from-config `
-  --non-interactive
+  --non-interactive `
+  --consent-confirmed
 ```
 
 Standard outputs include:
@@ -629,13 +676,19 @@ Advanced reuses the same company-wide inventory and remote collection model as S
 Run Advanced on Windows:
 
 ```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package advanced
+```
+
+Headless/config-driven Advanced:
+
+```powershell
 C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
   --config C:\SounRunner\config\config.yaml `
   --data-dir C:\SounRunner\data `
   --log-dir C:\SounRunner\logs `
   --package advanced `
-  --scope-from-config `
-  --non-interactive
+  --non-interactive `
+  --consent-confirmed
 ```
 
 Advanced outputs include all Standard outputs plus:

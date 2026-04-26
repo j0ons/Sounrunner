@@ -17,61 +17,53 @@ def test_normalize_prompt_value_handles_none() -> None:
     assert normalize_prompt_value("  basic  ") == "basic"
 
 
-def test_collect_intake_reprompts_for_empty_scope(monkeypatch, capsys) -> None:
+def test_collect_intake_only_prompts_for_company_and_package(monkeypatch) -> None:
     ui = ConsoleUi(app_version="test")
     ui.console = None
-    _set_inputs(
-        monkeypatch,
-        [
-            "Client",
-            "HQ",
-            "Operator",
-            "basic",
-            "",
-            "10.0.0.0/24",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "n",
-            "y",
-        ],
-    )
+    monkeypatch.setattr("app.ui.console.getpass.getuser", lambda: "DetectedOperator")
+    _set_inputs(monkeypatch, ["Client", "standard"])
 
     intake = ui.collect_intake()
 
-    assert intake.authorized_scope == "10.0.0.0/24"
-    assert "Authorized scope/subnet cannot be blank." in capsys.readouterr().out
+    assert intake.client_name == "Client"
+    assert intake.package == "standard"
+    assert intake.site == "Auto-detected"
+    assert intake.operator_name == "DetectedOperator"
+    assert intake.authorized_scope == "local-host-only"
+    assert intake.consent_confirmed is True
 
 
-def test_collect_intake_reprompts_for_invalid_allowlist_entry(monkeypatch, capsys) -> None:
+def test_collect_intake_reprompts_invalid_package(monkeypatch, capsys) -> None:
     ui = ConsoleUi(app_version="test")
     ui.console = None
-    _set_inputs(
-        monkeypatch,
-        [
-            "Client",
-            "HQ",
-            "Operator",
-            "basic",
-            "local-host-only",
-            "CIDR",
-            "server01,10.0.0.10",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "n",
-            "y",
-        ],
-    )
+    _set_inputs(monkeypatch, ["Client", "wrong", "advanced"])
 
     intake = ui.collect_intake()
 
-    assert intake.host_allowlist == ["server01", "10.0.0.10"]
+    assert intake.package == "advanced"
+    assert "Assessment package must be one of: basic, standard, advanced." in capsys.readouterr().out
+
+
+def test_complete_intake_drops_invalid_allowlist_seed_without_prompt(monkeypatch, capsys) -> None:
+    ui = ConsoleUi(app_version="test")
+    ui.console = None
+    _set_inputs(monkeypatch, [])
+    seed = AssessmentIntake(
+        client_name="Client",
+        site="HQ",
+        operator_name="Operator",
+        package="basic",
+        authorized_scope="local-host-only",
+        scope_notes="No additional notes.",
+        consent_confirmed=True,
+        host_allowlist=["CIDR"],
+        host_denylist=["server01"],
+    )
+
+    intake = ui.complete_intake(seed)
+
+    assert intake.host_allowlist == []
+    assert intake.host_denylist == ["server01"]
     assert (
         "Invalid host entry 'CIDR'. Expected IP address, hostname, or FQDN. "
         "Put CIDR ranges in Authorized scope/subnet."
@@ -81,24 +73,7 @@ def test_collect_intake_reprompts_for_invalid_allowlist_entry(monkeypatch, capsy
 def test_collect_intake_blank_optional_fields_are_normalized(monkeypatch) -> None:
     ui = ConsoleUi(app_version="test")
     ui.console = None
-    _set_inputs(
-        monkeypatch,
-        [
-            "Client",
-            "HQ",
-            "Operator",
-            "basic",
-            "local-host-only",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "yes",
-        ],
-    )
+    _set_inputs(monkeypatch, ["Client", "basic"])
 
     intake = ui.collect_intake()
 
@@ -114,35 +89,19 @@ def test_collect_intake_blank_optional_fields_are_normalized(monkeypatch) -> Non
 def test_collect_intake_interactive_basic_run_input_normalization(monkeypatch) -> None:
     ui = ConsoleUi(app_version="test")
     ui.console = None
-    _set_inputs(
-        monkeypatch,
-        [
-            " Client ",
-            " HQ ",
-            " Operator ",
-            None,
-            " local-host-only ",
-            None,
-            None,
-            " corp.local ",
-            " Finance ",
-            None,
-            " example.com ",
-            None,
-            "y",
-        ],
-    )
+    monkeypatch.setattr("app.ui.console.getpass.getuser", lambda: "Operator")
+    _set_inputs(monkeypatch, [" Client ", None])
 
     intake = ui.collect_intake()
 
     assert intake.client_name == "Client"
-    assert intake.site == "HQ"
+    assert intake.site == "Auto-detected"
     assert intake.operator_name == "Operator"
     assert intake.package == "basic"
     assert intake.authorized_scope == "local-host-only"
-    assert intake.ad_domain == "corp.local"
-    assert intake.business_unit == "Finance"
-    assert intake.domain == "example.com"
+    assert intake.ad_domain is None
+    assert intake.business_unit == ""
+    assert intake.domain is None
     assert intake.m365_connector is False
     assert intake.consent_confirmed is True
 

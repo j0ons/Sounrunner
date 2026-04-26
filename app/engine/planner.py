@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 
 from app.core.config import AppConfig
@@ -75,6 +76,12 @@ def build_assessment_plan(
 
     estate_mode = package in {"standard", "advanced"}
     approved_scopes = session.scope.scan_targets()
+    auto_context = session.database.get_metadata("auto_context", {})
+    scope_source = (
+        str(auto_context.get("scope_source", "config_scope" if approved_scopes else "localhost_only_fallback"))
+        if isinstance(auto_context, dict)
+        else "config_scope"
+    )
     scanner_enabled = _scanner_sources_present(config)
     firewall_import = bool(
         config.firewall_vpn_import.enabled and config.firewall_vpn_import.import_paths
@@ -87,7 +94,8 @@ def build_assessment_plan(
     )
     email_enabled = bool(session.intake.domain)
     ad_enabled = bool(config.active_directory.enabled)
-    nmap_enabled = bool(config.nmap.enabled and approved_scopes and not session.scope.local_only)
+    nmap_available = _nmap_available(config)
+    nmap_enabled = bool(config.nmap.enabled and nmap_available and approved_scopes and not session.scope.local_only)
     remote_windows_enabled = bool(config.remote_windows.enabled)
 
     warnings: list[str] = []
@@ -132,9 +140,9 @@ def build_assessment_plan(
             "approved_scope",
             "active" if approved_scopes or session.scope.local_only else "missing",
             (
-                ", ".join(approved_scopes)
+                f"{scope_source}: {', '.join(approved_scopes)}"
                 if approved_scopes
-                else "local-host-only"
+                else f"{scope_source}: local-host-only"
                 if session.scope.local_only
                 else "No approved scope configured."
             ),
@@ -145,7 +153,7 @@ def build_assessment_plan(
             (
                 f"Approved scope discovery will target {', '.join(approved_scopes)}."
                 if nmap_enabled
-                else "Nmap disabled, local-only scope, or no scan targets are available."
+                else "Nmap disabled, unavailable, local-only scope, or no scan targets are available."
             ),
         ),
         _source_entry(
@@ -337,6 +345,12 @@ def _scanner_sources_present(config: AppConfig) -> bool:
             config.scanner_integrations.greenbone_api.enabled,
         ]
     )
+
+
+def _nmap_available(config: AppConfig) -> bool:
+    if not config.nmap.enabled:
+        return False
+    return bool(shutil.which(config.nmap.path))
 
 
 def _module(

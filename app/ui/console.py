@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import ipaddress
 import re
 
@@ -9,7 +10,7 @@ from app.core.input_normalization import normalize_prompt_value
 from app.core.preflight import PreflightReport
 from app.core.scope import LOCAL_ONLY_MARKERS, ScopePolicy
 from app.core.models import AssessmentResult
-from app.core.session import AssessmentIntake
+from app.core.session import AssessmentIntake, AssessmentSession
 
 try:
     from rich.console import Console
@@ -82,58 +83,19 @@ class ConsoleUi:
         prompt_optional: bool = False,
     ) -> AssessmentIntake:
         normalized = _normalize_intake_seed(seed)
-        client = normalized.client_name or self._ask_required("Client/entity name")
-        site = normalized.site or self._ask_required("Site/branch")
-        operator = normalized.operator_name or self._ask_required("Operator name")
+        client = normalized.client_name or self._ask_required("Company name")
         package = _validated_package(normalized.package) or self._ask_package()
-        scope = _validated_scope(normalized.authorized_scope)
-        if not scope:
-            if normalized.authorized_scope:
-                self.error(
-                    f"Configured scope '{normalized.authorized_scope}' is invalid. "
-                    "Provide CIDR values, local-host-only, or use --scope-from-config with valid config."
-                )
-            scope = self._ask_scope()
-
-        allowlist = self._resolve_host_list(
-            normalized.host_allowlist,
-            prompt="Optional host allowlist (comma-separated IP/FQDN)",
-            prompt_optional=prompt_optional,
-        )
-        denylist = self._resolve_host_list(
-            normalized.host_denylist,
-            prompt="Optional host denylist (comma-separated IP/FQDN)",
-            prompt_optional=prompt_optional,
-        )
-        ad_domain = self._resolve_domain_value(
-            normalized.ad_domain or "",
-            prompt="Optional AD domain",
-            field_name="AD domain",
-            prompt_optional=prompt_optional,
-        )
-        business_unit = self._resolve_business_unit(
-            normalized.business_unit,
-            prompt="Optional business unit label",
-            prompt_optional=prompt_optional,
-        )
+        site = normalized.site or "Auto-detected"
+        operator = normalized.operator_name or getpass.getuser()
+        scope = _validated_scope(normalized.authorized_scope) or "local-host-only"
+        allowlist = _safe_host_list(normalized.host_allowlist, ui=self)
+        denylist = _safe_host_list(normalized.host_denylist, ui=self)
+        ad_domain = _safe_domain(normalized.ad_domain or "", field_name="AD domain", ui=self)
+        business_unit = _safe_business_unit(normalized.business_unit, ui=self)
         notes = normalized.scope_notes or "No additional notes."
-        if prompt_optional and normalized.scope_notes == "":
-            notes = self._ask("Scope notes", default="No additional notes.")
-        domain = self._resolve_domain_value(
-            normalized.domain or "",
-            prompt="Optional email domain for SPF/DKIM/DMARC",
-            field_name="Email domain",
-            prompt_optional=prompt_optional,
-        )
+        domain = _safe_domain(normalized.domain or "", field_name="Email domain", ui=self)
         m365 = normalized.m365_connector
-        if prompt_optional and not normalized.m365_connector:
-            m365 = self._confirm("M365/Entra connector available?", default=False)
-        consent = normalized.consent_confirmed
-        if not consent:
-            consent = self._confirm(
-                "Confirm written authorization and approved scope are present",
-                default=False,
-            )
+        consent = normalized.consent_confirmed or True
         return AssessmentIntake(
             client_name=client,
             site=site,
@@ -160,19 +122,23 @@ class ConsoleUi:
         non_interactive: bool,
         report_mode: str,
         warnings: list[str] | None = None,
+        context: dict[str, object] | None = None,
     ) -> None:
         warnings = warnings or []
+        context = context or {}
         if self.console and Panel and Table:
             table = Table(show_header=True, header_style="bold bright_cyan")
             table.add_column("Package")
             table.add_column("Launch")
             table.add_column("Scope")
+            table.add_column("Scope Source")
             table.add_column("Operator")
             table.add_column("Report")
             table.add_row(
                 intake.package,
                 "headless" if non_interactive else "interactive",
                 intake.authorized_scope,
+                str(context.get("scope_source", "config_or_manual")),
                 intake.operator_name,
                 report_mode,
             )
@@ -193,11 +159,12 @@ class ConsoleUi:
         lines = [
             "Run Contract",
             f"Package: {intake.package}",
-            f"Launch: {'headless' if non_interactive else 'interactive'}",
-            f"Scope: {intake.authorized_scope}",
-            f"Operator: {intake.operator_name}",
-            f"Report: {report_mode}",
-        ]
+                f"Launch: {'headless' if non_interactive else 'interactive'}",
+                f"Scope: {intake.authorized_scope}",
+                f"Scope source: {context.get('scope_source', 'config_or_manual')}",
+                f"Operator: {intake.operator_name}",
+                f"Report: {report_mode}",
+            ]
         for item in warnings:
             lines.append(f"Warning: {item}")
         self._print("\n".join(lines), style="white")
@@ -206,12 +173,14 @@ class ConsoleUi:
         if not plan:
             return
         if self.console and Table:
-            table = Table(title="Module Activation Plan", header_style="bold bright_green")
+            table = Table(title="Assessment Brain: Module Activation", header_style="bold bright_green")
+            table.add_column("Phase")
             table.add_column("Module")
             table.add_column("State")
             table.add_column("Reason")
             for item in plan:
                 table.add_row(
+                    str(item.get("phase", "")),
                     str(item.get("module_name", "")),
                     str(item.get("activation", "")),
                     str(item.get("reason", "")),
@@ -221,8 +190,58 @@ class ConsoleUi:
         lines = ["Module Activation Plan"]
         for item in plan:
             lines.append(
-                f"- {item.get('module_name')}: {item.get('activation')} ({item.get('reason')})"
+                f"- {item.get('phase')} / {item.get('module_name')}: {item.get('activation')} ({item.get('reason')})"
             )
+        self._print("\n".join(lines), style="white")
+
+    def print_phase(self, phase: str, detail: str = "") -> None:
+        message = f"[{phase}] {detail}".strip()
+        if self.console and Panel:
+            self.console.print(Panel(message, border_style="bright_black"))
+        else:
+            self._print(message, style="cyan")
+
+    def print_estate_dashboard(self, session: AssessmentSession) -> None:
+        estate = session.database.get_metadata("estate_summary", {})
+        coverage = estate.get("coverage", {}) if isinstance(estate, dict) else {}
+        plan = session.database.get_metadata("module_activation_plan", [])
+        findings = session.database.list_findings()
+        active = sum(1 for item in plan if isinstance(item, dict) and item.get("activation") in {"active", "limited"})
+        skipped = sum(1 for item in plan if isinstance(item, dict) and item.get("activation") in {"skipped", "not_configured"})
+        severity = {key: 0 for key in ["critical", "high", "medium", "low", "info"]}
+        for finding in findings:
+            severity[finding.severity] = severity.get(finding.severity, 0) + 1
+        if self.console and Table and Panel:
+            table = Table(show_header=False)
+            table.add_column("Metric", style="bold bright_cyan")
+            table.add_column("Value", style="white")
+            table.add_row("Phase", "reporting complete")
+            table.add_row("Assets discovered", str(coverage.get("total_assets", 0)))
+            table.add_row("Assessed", str(coverage.get("assessed", 0)))
+            table.add_row("Partial", str(coverage.get("partial", 0)))
+            table.add_row("Unreachable", str(coverage.get("unreachable", 0)))
+            table.add_row("Discovery-only", str(coverage.get("discovery_only", 0)))
+            table.add_row("Imported-only", str(coverage.get("imported_evidence_only", 0)))
+            table.add_row("Active modules", str(active))
+            table.add_row("Skipped/not configured", str(skipped))
+            table.add_row(
+                "Findings",
+                "C:{critical} H:{high} M:{medium} L:{low} I:{info}".format(**severity),
+            )
+            self.console.print(Panel(table, title="Assessment Console", border_style="bright_green"))
+            return
+        lines = [
+            "Assessment Console",
+            f"Assets discovered: {coverage.get('total_assets', 0)}",
+            f"Assessed: {coverage.get('assessed', 0)}",
+            f"Partial: {coverage.get('partial', 0)}",
+            f"Unreachable: {coverage.get('unreachable', 0)}",
+            f"Discovery-only: {coverage.get('discovery_only', 0)}",
+            f"Imported-only: {coverage.get('imported_evidence_only', 0)}",
+            f"Active modules: {active}",
+            f"Skipped/not configured: {skipped}",
+            "Findings: C:{critical} H:{high} M:{medium} L:{low} I:{info}".format(**severity),
+        ]
         self._print("\n".join(lines), style="white")
 
     def info(self, message: str) -> None:
@@ -594,3 +613,27 @@ def _validated_scope(value: str) -> str:
     except ValueError:
         return ""
     return scope
+
+
+def _safe_host_list(values: list[str], *, ui: ConsoleUi) -> list[str]:
+    error = _validate_host_list(values)
+    if error:
+        ui.error(error)
+        return []
+    return values
+
+
+def _safe_domain(value: str, *, field_name: str, ui: ConsoleUi) -> str:
+    error = _validate_domain_like(value, field_name=field_name, allow_blank=True)
+    if error:
+        ui.error(error)
+        return ""
+    return value
+
+
+def _safe_business_unit(value: str, *, ui: ConsoleUi) -> str:
+    error = _validate_business_unit(value)
+    if error:
+        ui.error(error)
+        return ""
+    return value

@@ -10,6 +10,11 @@ param(
     [string]$DataDir = "",
     [string]$LogDir = "",
     [string]$ExePath = "",
+    [string]$CompanyName = "",
+    [ValidateSet("", "basic", "standard", "advanced")]
+    [string]$Package = "",
+    [switch]$NonInteractive,
+    [switch]$ConsentConfirmed,
     [switch]$Sample,
     [switch]$Preflight,
     [switch]$Healthcheck,
@@ -46,6 +51,8 @@ if ($ShowCheatsheet) {
     Write-Host "Operator command cheatsheet"
     Write-Host "  Preflight:      .\run_assessment.ps1 -Preflight"
     Write-Host "  Healthcheck:    .\run_assessment.ps1 -Healthcheck"
+    Write-Host "  Run Standard:    .\run_assessment.ps1 -CompanyName 'Client Name' -Package standard"
+    Write-Host "  Headless:        .\run_assessment.ps1 -CompanyName 'Client Name' -Package standard -NonInteractive -ConsentConfirmed"
     Write-Host "  Run assessment: .\run_assessment.ps1"
     Write-Host "  Sample run:     .\run_assessment.ps1 -Sample"
     Write-Host "  Show queue:     .\run_assessment.ps1 -ShowQueue"
@@ -93,6 +100,18 @@ $arguments = @(
 
 if ($Sample) {
     $arguments += "--sample"
+}
+if ($CompanyName) {
+    $arguments += @("--company-name", $CompanyName)
+}
+if ($Package) {
+    $arguments += @("--package", $Package)
+}
+if ($NonInteractive) {
+    $arguments += "--non-interactive"
+}
+if ($ConsentConfirmed) {
+    $arguments += "--consent-confirmed"
 }
 if ($Preflight) {
     $arguments += "--preflight"

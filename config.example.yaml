@@ -4,7 +4,9 @@ read_only: true
 log_level: "INFO"
 report_company_name: "Soun Al Hosn Cybersecurity LLC"
 assessment:
-  # Set these values for headless Standard/Advanced execution.
+  # Minimal launch requires company/client name and package.
+  # Standard/Advanced auto-detect directly connected private subnets when approved_scopes is empty.
+  # Explicit approved scopes are stronger and should be used when the client authorization letter defines them.
   client_name: ""
   site: ""
   operator_name: ""

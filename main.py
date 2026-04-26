@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import re
 import sys
 from pathlib import Path
 
 from app import __version__
+from app.core.auto_context import (
+    AutoEnterpriseContext,
+    apply_auto_context_to_config,
+    detect_enterprise_context,
+)
 from app.core.config import AppConfig
 from app.core.input_normalization import normalize_prompt_value
 from app.core.integrity import store_preflight_report
@@ -18,6 +25,9 @@ from app.engine.basic import BasicPackageRunner
 from app.engine.standard import StandardPackageRunner
 from app.export.callback import CallbackManager, inspect_callback_queue, retry_callback_queue
 from app.ui.console import ConsoleUi
+
+_DOMAIN_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_RESERVED_HOST_TOKENS = {"cidr", "subnet", "scope", "network", "ip", "fqdn", "hostname"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help="Client/entity name override for headless or config-first runs.",
+    )
+    parser.add_argument(
+        "--company-name",
+        type=str,
+        default="",
+        help="Company/client name override. Alias for --client-name.",
     )
     parser.add_argument(
         "--site",
@@ -187,17 +203,23 @@ def main() -> int:
             ui.success(f"Manual callback resend completed with status: {status}")
             return 0
 
-        intake = _resolve_intake(args=args, config=config, ui=ui)
+        ui.print_phase("Launch", "Detecting local enterprise context and auto-scope.")
+        auto_context = detect_enterprise_context(config)
+        apply_auto_context_to_config(config, auto_context)
+        intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=auto_context)
         report_mode = _resolve_report_mode(args.report_mode, config, intake.package)
         launch_warnings = _launch_warnings(intake, config)
+        launch_warnings.extend(auto_context.warnings)
         ui.print_launch_summary(
             intake,
             non_interactive=bool(args.non_interactive),
             report_mode=report_mode,
             warnings=launch_warnings,
+            context=auto_context.to_dict(),
         )
         session = SessionManager(config).create_session(intake)
         store_preflight_report(session, preflight.to_dict())
+        session.database.set_metadata("auto_context", auto_context.to_dict())
         session.database.set_metadata(
             "launch_context",
             {
@@ -206,6 +228,7 @@ def main() -> int:
                 "warnings": launch_warnings,
                 "scope_from_config": bool(args.scope_from_config),
                 "consent_confirmed_via_cli": bool(args.consent_confirmed),
+                "auto_scope_source": auto_context.scope_source,
             },
         )
         if preflight.overall_status == "degraded":
@@ -213,10 +236,13 @@ def main() -> int:
                 "Preflight degraded. Missing dependencies or limited access will be marked as partial or skipped."
             )
         if intake.package == "basic":
+            ui.print_phase("Execution", "Running Basic local validation package.")
             result = BasicPackageRunner(config=config, session=session, ui=ui, report_mode=report_mode).run()
         elif intake.package == "standard":
+            ui.print_phase("Execution", "Running Standard company assessment package.")
             result = StandardPackageRunner(config=config, session=session, ui=ui, report_mode=report_mode).run()
         elif intake.package == "advanced":
+            ui.print_phase("Execution", "Running Advanced company assessment package.")
             result = AdvancedPackageRunner(config=config, session=session, ui=ui, report_mode=report_mode).run()
         else:
             ui.error(f"Unsupported assessment package: {intake.package}")
@@ -229,6 +255,7 @@ def main() -> int:
         return 1
 
     ui.success("Assessment complete.")
+    ui.print_estate_dashboard(session)
     ui.print_result(result)
     return 0
 
@@ -281,11 +308,13 @@ def _resolve_intake(
     args: argparse.Namespace,
     config: AppConfig,
     ui: ConsoleUi,
+    auto_context: AutoEnterpriseContext | None = None,
 ) -> AssessmentIntake:
     if args.sample:
         return _apply_config_defaults(sample_intake(), config)
 
-    intake = _build_seed_intake(args, config)
+    context = auto_context or detect_enterprise_context(config)
+    intake = _build_seed_intake(args, config, context)
     intake = _apply_config_defaults(intake, config)
     if args.non_interactive:
         errors = _launch_validation_errors(intake)
@@ -296,29 +325,43 @@ def _resolve_intake(
                 + ". Supply valid values via CLI or config."
             )
         return intake
-    if _launch_validation_errors(intake):
+    errors = _launch_validation_errors(intake)
+    if errors and _prompt_can_fix(errors):
         return ui.complete_intake(intake, prompt_optional=False)
+    if errors:
+        raise ValueError("Launch validation failed: " + "; ".join(errors) + ". Fix CLI or config values.")
     return intake
 
 
-def _build_seed_intake(args: argparse.Namespace, config: AppConfig) -> AssessmentIntake:
+def _build_seed_intake(
+    args: argparse.Namespace,
+    config: AppConfig,
+    context: AutoEnterpriseContext,
+) -> AssessmentIntake:
     package = normalize_prompt_value(args.package or config.assessment.package).lower()
     configured_scope = _scope_value_from_config(config)
-    scope = configured_scope if (args.scope_from_config or configured_scope) else ""
+    scope = configured_scope or context.default_scope
+    company_name = normalize_prompt_value(
+        args.company_name or args.client_name or config.assessment.client_name
+    )
     return AssessmentIntake(
-        client_name=normalize_prompt_value(args.client_name or config.assessment.client_name),
-        site=normalize_prompt_value(args.site or config.assessment.site),
-        operator_name=normalize_prompt_value(args.operator or config.assessment.operator_name),
+        client_name=company_name,
+        site=normalize_prompt_value(args.site or config.assessment.site or context.site_label),
+        operator_name=normalize_prompt_value(args.operator or config.assessment.operator_name or context.operator_name),
         package=package,
         authorized_scope=scope,
-        scope_notes=normalize_prompt_value(config.assessment.scope_notes),
-        consent_confirmed=bool(args.consent_confirmed or config.assessment.consent_confirmed),
-        domain=normalize_prompt_value(config.assessment.client_domain) or None,
+        scope_notes=_scope_notes(config, context),
+        consent_confirmed=bool(
+            args.consent_confirmed
+            or config.assessment.consent_confirmed
+            or not args.non_interactive
+        ),
+        domain=normalize_prompt_value(config.assessment.client_domain or context.email_domain) or None,
         m365_connector=bool(config.m365_entra.enabled or config.m365_entra.evidence_json_path),
         host_allowlist=list(config.assessment.host_allowlist),
         host_denylist=list(config.assessment.host_denylist),
-        ad_domain=normalize_prompt_value(config.assessment.ad_domain or config.active_directory.domain) or None,
-        business_unit=normalize_prompt_value(config.assessment.business_unit),
+        ad_domain=normalize_prompt_value(config.assessment.ad_domain or config.active_directory.domain or context.ad_domain) or None,
+        business_unit=normalize_prompt_value(config.assessment.business_unit or context.business_unit),
         scope_labels=dict(config.assessment.scope_labels),
         scanner_sources=list(config.assessment.scanner_sources),
         cloud_tenants=list(config.assessment.cloud_tenants),
@@ -335,10 +378,6 @@ def _missing_required_values(intake: AssessmentIntake) -> list[str]:
     missing: list[str] = []
     if not normalize_prompt_value(intake.client_name):
         missing.append("client_name")
-    if not normalize_prompt_value(intake.site):
-        missing.append("site")
-    if not normalize_prompt_value(intake.operator_name):
-        missing.append("operator_name")
     if normalize_prompt_value(intake.package).lower() not in {"basic", "standard", "advanced"}:
         missing.append("package")
     if not normalize_prompt_value(intake.authorized_scope):
@@ -353,6 +392,10 @@ def _launch_validation_errors(intake: AssessmentIntake) -> list[str]:
     package = normalize_prompt_value(intake.package).lower()
     if package and package not in {"basic", "standard", "advanced"}:
         errors.append("invalid package")
+    for label, values in [("host allowlist", intake.host_allowlist), ("host denylist", intake.host_denylist)]:
+        error = _host_list_validation_error(label, values)
+        if error:
+            errors.append(error)
     scope = normalize_prompt_value(intake.authorized_scope)
     if scope:
         try:
@@ -369,6 +412,37 @@ def _launch_validation_errors(intake: AssessmentIntake) -> list[str]:
     return errors
 
 
+def _prompt_can_fix(errors: list[str]) -> bool:
+    """Only company/package errors are recoverable by the minimal interactive intake."""
+
+    recoverable = {"missing client_name", "missing package", "invalid package"}
+    return all(item in recoverable for item in errors)
+
+
+def _host_list_validation_error(label: str, values: list[str]) -> str | None:
+    for value in values:
+        candidate = normalize_prompt_value(value).rstrip(".")
+        if not _is_valid_host_selector(candidate):
+            return f"invalid {label} entry '{value}'. Expected IP address, hostname, or FQDN."
+    return None
+
+
+def _is_valid_host_selector(value: str) -> bool:
+    if not value or value.lower() in _RESERVED_HOST_TOKENS:
+        return False
+    if value.lower() in {"local", "localhost", "local-host-only", "host-only"}:
+        return True
+    if "/" in value:
+        return False
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        if ".." in value or len(value) > 253:
+            return False
+        return all(_DOMAIN_LABEL_PATTERN.fullmatch(label) for label in value.split("."))
+
+
 def _resolve_report_mode(cli_value: str, config: AppConfig, package: str) -> str:
     requested = normalize_prompt_value(cli_value).lower()
     if not requested or requested == "auto":
@@ -376,6 +450,16 @@ def _resolve_report_mode(cli_value: str, config: AppConfig, package: str) -> str
     if requested in {"basic", "standard", "advanced"}:
         return requested
     return package
+
+
+def _scope_notes(config: AppConfig, context: AutoEnterpriseContext) -> str:
+    configured = normalize_prompt_value(config.assessment.scope_notes)
+    source = f"Scope source: {context.scope_source}."
+    if configured and configured != "No additional notes.":
+        return f"{configured} {source}"
+    if context.private_subnets:
+        return f"{source} Auto-detected directly connected private subnet(s): {', '.join(context.private_subnets)}."
+    return source
 
 
 def _launch_warnings(intake: AssessmentIntake, config: AppConfig) -> list[str]:
