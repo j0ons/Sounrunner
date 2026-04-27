@@ -32,6 +32,27 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
         },
     )
     session.database.set_metadata("assessment_warnings", ["Remote Windows collection not configured."])
+    session.database.set_metadata(
+        "remote_collection_strategy",
+        {
+            "mode": "current_user_integrated_auth",
+            "reason": "Domain context detected.",
+            "domain_joined": True,
+            "current_user_context": True,
+            "require_winrm_port_observed": True,
+        },
+    )
+    session.database.set_metadata(
+        "remote_collection_summary",
+        {
+            "windows_candidates": 12,
+            "collection_attempted": 8,
+            "collection_successful": 5,
+            "collection_partial": 1,
+            "collection_failed": 2,
+            "top_failure_reason": "access_denied",
+        },
+    )
     session.crypto.write_text(
         session.manifest_path,
         json.dumps(
@@ -55,6 +76,8 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
     assert "nessus_api" in str(appendix["import_sources"])
     assert appendix["assessment_warnings"]
     assert appendix["discovery_sources"]
+    assert "current_user_integrated_auth" in appendix["remote_collection_strategy"]
+    assert "attempted=8" in appendix["remote_collection_summary"]
 
 
 def _finding() -> Finding:

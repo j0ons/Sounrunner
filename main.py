@@ -208,7 +208,7 @@ def main() -> int:
         apply_auto_context_to_config(config, auto_context)
         intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=auto_context)
         report_mode = _resolve_report_mode(args.report_mode, config, intake.package)
-        launch_warnings = _launch_warnings(intake, config)
+        launch_warnings = _launch_warnings(intake, config, auto_context)
         launch_warnings.extend(auto_context.warnings)
         ui.print_launch_summary(
             intake,
@@ -462,7 +462,11 @@ def _scope_notes(config: AppConfig, context: AutoEnterpriseContext) -> str:
     return source
 
 
-def _launch_warnings(intake: AssessmentIntake, config: AppConfig) -> list[str]:
+def _launch_warnings(
+    intake: AssessmentIntake,
+    config: AppConfig,
+    auto_context: AutoEnterpriseContext | None = None,
+) -> list[str]:
     warnings: list[str] = []
     if intake.package in {"standard", "advanced"} and intake.authorized_scope.lower() in {
         "local",
@@ -473,9 +477,16 @@ def _launch_warnings(intake: AssessmentIntake, config: AppConfig) -> list[str]:
         warnings.append(
             "Standard/Advanced selected with localhost-only scope. Coverage will be limited to the local host and any imported evidence."
         )
-    if intake.package in {"standard", "advanced"} and not config.remote_windows.enabled:
+    auto_current_user_available = bool(
+        auto_context
+        and config.remote_windows.auto_current_user
+        and config.remote_windows.attempt_current_user_when_domain_joined
+        and auto_context.os_name.lower() == "windows"
+        and (auto_context.domain_joined or auto_context.ad_domain)
+    )
+    if intake.package in {"standard", "advanced"} and not config.remote_windows.enabled and not auto_current_user_available:
         warnings.append(
-            "Remote Windows collection is not configured. Estate coverage will rely on discovery, directory, cloud, and import evidence only."
+            "Remote Windows collection has no configured credential path and no current-user domain-auth path was detected. Estate coverage will rely on discovery, directory, cloud, and import evidence only."
         )
     if intake.package in {"standard", "advanced"} and not any(
         [

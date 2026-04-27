@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from app.core.config import AppConfig
 from app.core.session import AssessmentSession
+from app.engine.remote_strategy import plan_remote_collection_strategy
 
 
 @dataclass(slots=True)
@@ -96,7 +97,8 @@ def build_assessment_plan(
     ad_enabled = bool(config.active_directory.enabled)
     nmap_available = _nmap_available(config)
     nmap_enabled = bool(config.nmap.enabled and nmap_available and approved_scopes and not session.scope.local_only)
-    remote_windows_enabled = bool(config.remote_windows.enabled)
+    remote_strategy = plan_remote_collection_strategy(session=session, config=config)
+    remote_windows_enabled = bool(remote_strategy.enabled)
 
     warnings: list[str] = []
     if estate_mode and session.scope.local_only:
@@ -105,7 +107,7 @@ def build_assessment_plan(
         )
     if estate_mode and not remote_windows_enabled:
         warnings.append(
-            "Remote Windows collection is not configured. Direct host validation will be limited to the local host plus any imported or directory evidence."
+            f"Remote Windows collection strategy is unavailable. Direct host validation will be limited. Reason: {remote_strategy.reason}"
         )
     if estate_mode and not any(
         [
@@ -169,9 +171,9 @@ def build_assessment_plan(
             "remote_windows",
             "active" if remote_windows_enabled else "not_configured",
             (
-                "WinRM-based remote Windows collection enabled."
+                f"WinRM remote collection strategy: {remote_strategy.mode}."
                 if remote_windows_enabled
-                else "Remote Windows collection not configured."
+                else f"Remote Windows collection unavailable: {remote_strategy.reason}"
             ),
         ),
         _source_entry(

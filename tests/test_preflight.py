@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from app.core.auto_context import AutoEnterpriseContext, DetectedInterface
-from app.core.preflight import preflight_exit_code, run_preflight
+from app.core.config import AppConfig
+from app.core.preflight import _current_user_remote_auth_check, preflight_exit_code, run_preflight
 
 
 def test_preflight_fails_for_missing_config(tmp_path: Path) -> None:
@@ -117,3 +118,36 @@ def test_preflight_reports_auto_scope_debug(monkeypatch, tmp_path: Path) -> None
     assert check.status == "ok"
     assert "scope_source=auto_detected_local_subnets" in check.detail
     assert "selected_scope=10.0.169.0/24" in check.detail
+
+
+def test_preflight_reports_current_user_remote_auth_when_domain_joined(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "app.core.preflight.detect_enterprise_context",
+        lambda _config: AutoEnterpriseContext(
+            hostname="runner01",
+            fqdn="runner01.corp.example.com",
+            operator_name="CORP\\operator",
+            os_name="Windows",
+            domain_joined=True,
+            domain_name="corp.example.com",
+            dns_suffixes=["corp.example.com"],
+            interfaces=[],
+            private_subnets=["10.0.0.0/24"],
+            scope_source="auto_detected_local_subnets",
+            default_scope="10.0.0.0/24",
+            site_label="CORP",
+            business_unit="",
+            email_domain="corp.example.com",
+            ad_domain="corp.example.com",
+            adapter_diagnostics=[],
+        ),
+    )
+    monkeypatch.setattr("app.core.preflight.is_windows", lambda: True)
+    monkeypatch.setattr("app.core.preflight.powershell_available", lambda: True)
+    config = AppConfig(workspace_root=tmp_path / "data", log_root=tmp_path / "logs")
+
+    check = _current_user_remote_auth_check(config)
+
+    assert check.status == "ok"
+    assert "strategy=current_user_integrated_auth" in check.detail
+    assert "current_auth_available=yes" in check.detail

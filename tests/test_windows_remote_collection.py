@@ -14,6 +14,7 @@ from app.collectors.windows_remote import _categorize_remote_failure
         ("Operation timed out while connecting to the host.", "timeout"),
         ("The firewall blocked the remote management request.", "firewall_blocked"),
         ("WinRM cannot complete the operation. Verify the service is running.", "winrm_unavailable"),
+        ("Authentication failed because the user name or password is incorrect.", "auth_failed"),
     ],
 )
 def test_remote_failure_categorization_maps_common_operator_blockers(

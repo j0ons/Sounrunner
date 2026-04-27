@@ -181,13 +181,13 @@ How it works:
    - configured cloud evidence
 3. Asset records are enriched with hostname/FQDN, site, business unit, role, criticality, and evidence lineage.
 4. The assessment planner decides which connectors and modules should run, records explicit active/not-configured reasons, and warns when coverage will be limited.
-5. The orchestrator plans remote Windows collection automatically for eligible in-scope hosts.
+5. The orchestrator selects a remote Windows collection strategy and plans collection automatically for eligible in-scope hosts.
 6. Discovery-only, imported-only, partial, unreachable, and fully assessed states are preserved honestly.
 7. Estate-level coverage, repeated control issues, and coverage gaps are generated automatically in Standard and Advanced.
 
 Discovery-only vs fully assessed:
 
-- `discovery_only`: host was found in approved scope, but no remote evidence was collected.
+- `discovery_only`: host was found in approved scope, but no safe remote evidence path was available or WinRM was not observed.
 - `partial`: some remote evidence was collected or access was limited.
 - `assessed`: remote host evidence was collected successfully.
 - `unreachable`: the host was discovered, but remote collection could not connect.
@@ -271,7 +271,9 @@ Standard and Advanced no longer behave like fixed prompt-driven scripts. They ac
 Examples:
 
 - If `active_directory.enabled: true`, AD evidence is attempted and inventory is enriched from directory data.
-- If `remote_windows.enabled: true`, the orchestrator automatically plans approved in-scope WinRM collection.
+- If explicit remote Windows credentials are configured, the orchestrator uses them for approved in-scope WinRM collection.
+- If no credentials are configured but the runner is on a domain-joined Windows host, it can attempt current-user integrated WinRM using the active Windows security context.
+- If neither path is available, hosts remain discovery-only and the report states why.
 - If firewall/VPN or backup import paths exist, those imports are ingested automatically.
 - If a client domain exists, DNS/email posture checks run.
 - If M365 / Entra config is present, the cloud evidence connector runs.
@@ -310,6 +312,40 @@ What changes:
 - merged findings retain source-aware evidence lineage
 - reports and JSON outputs use the consolidated finding instead of dumping obvious duplicates side by side
 - estate-level repeated findings are generated from the correlated set, not the noisy raw set
+
+## Automatic Remote Windows Collection Strategy
+
+Standard and Advanced do not require an interactive credential prompt. The runner chooses one of three strategies:
+
+- `configured_credentials`: used when `remote_windows.enabled: true`, a username is configured, and the password is referenced through an environment variable or external secret file.
+- `current_user_integrated_auth`: used when no explicit credential is configured, the runner is executing on Windows with PowerShell available, and domain context is detected. This uses WinRM/PowerShell remoting with the current Windows security context. No password is requested or stored.
+- `discovery_only_fallback`: used when there is no configured credential path and no safe current-user domain-auth path. Assets remain discovery-only unless imports or other evidence sources cover them.
+
+By default, automatic current-user collection only attempts hosts where approved discovery observed WinRM on TCP 5985 or 5986. This is deliberate. The runner does not enable WinRM, change firewalls, try alternate admin channels, or guess credentials.
+
+Reports and the terminal dashboard show:
+
+- remote collection strategy
+- Windows candidate count
+- collection attempts
+- successful, partial, and failed collection counts
+- top remote failure reason
+- discovery-only assets caused by missing or blocked remote collection paths
+
+To improve coverage safely, use a client-approved domain assessment account and store the password outside the config:
+
+```powershell
+$env:SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD = "use-the-client-approved-secret"
+SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard
+```
+
+```yaml
+remote_windows:
+  enabled: true
+  username: "CORP\\assessment-operator"
+  password_env: "SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD"
+  require_winrm_port_observed: true
+```
 
 ## Nmap On Windows
 
@@ -368,6 +404,10 @@ orchestration:
 
 remote_windows:
   enabled: true
+  auto_current_user: true
+  attempt_current_user_when_domain_joined: true
+  require_winrm_port_observed: true
+  max_auto_attempts: 50
   transport: "winrm"
   username: "CORP\\assessment-operator"
   password_env: "SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD"
@@ -565,6 +605,7 @@ Soun Runner does not widen scope or pivot to alternate admin channels when WinRM
 Common remoting failure categories:
 
 - `winrm_unavailable`
+- `auth_failed`
 - `access_denied`
 - `dns_resolution`
 - `firewall_blocked`
@@ -1020,9 +1061,10 @@ For company-wide runs over AnyDesk:
 
 1. Confirm written authorization covers every approved subnet and remote admin path.
 2. Run `-Preflight` first.
-3. Verify `config.yaml` contains approved CIDRs, labels, and remote Windows settings.
-4. Launch Standard or Advanced.
-5. Treat `discovery_only` and `unreachable` hosts as coverage gaps, not completed assessments.
+3. Verify scope was auto-detected or explicitly approved in `config.yaml`.
+4. Check the reported remote collection strategy. If it is `current_user_integrated_auth`, confirm the current domain user has approved read access. If it is `discovery_only_fallback`, configure an approved credential reference or accept discovery-only coverage.
+5. Launch Standard or Advanced.
+6. Treat `discovery_only` and `unreachable` hosts as coverage gaps, not completed assessments.
 
 ## Output Paths
 
@@ -1071,6 +1113,7 @@ Fully validated in this repo:
 - DNS/email evidence checks.
 - Approved-scope Nmap execution and parsing.
 - Multi-CIDR scope parsing, inventory storage, estate aggregation, and organization coverage reporting.
+- Automatic remote Windows strategy selection with configured credentials, current-user integrated auth, or honest discovery-only fallback.
 - Scanner file imports.
 - Callback queueing, retry, and manual resend flow.
 - Audit trail, evidence manifest, encrypted bundle generation, and report generation.
@@ -1082,7 +1125,7 @@ Still partial or environment-dependent:
 - Nessus API foundation depends on valid X-ApiKeys and completed export availability.
 - Greenbone API foundation depends on optional `python-gvm`, reachable GMP access, and environment-specific TLS/SSH setup.
 - Windows PowerShell collector behavior must still be validated on the actual client host and privilege context.
-- Remote Windows collection depends on WinRM reachability, operator credentials, host policy, and local firewall state in the client environment.
+- Remote Windows collection depends on WinRM reachability, domain/current-user authorization or approved credentials, host policy, and local firewall state in the client environment.
 - Company-wide field validation still depends on real client subnets and remote admin realities. Discovery-only coverage is expected when remote collection is blocked.
 
 ## Local Development

@@ -254,7 +254,7 @@ def test_launch_warnings_flag_limited_standard_scope() -> None:
     warnings = _launch_warnings(intake, config)
 
     assert any("localhost-only scope" in item for item in warnings)
-    assert any("Remote Windows collection is not configured" in item for item in warnings)
+    assert any("no configured credential path" in item for item in warnings)
 
 
 def test_visual_launch_summary_handles_non_rich_console(capsys) -> None:

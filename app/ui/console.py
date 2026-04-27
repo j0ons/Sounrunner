@@ -230,6 +230,8 @@ class ConsoleUi:
     def print_estate_dashboard(self, session: AssessmentSession) -> None:
         estate = session.database.get_metadata("estate_summary", {})
         coverage = estate.get("coverage", {}) if isinstance(estate, dict) else {}
+        remote = session.database.get_metadata("remote_collection_summary", {})
+        remote = remote if isinstance(remote, dict) else {}
         plan = session.database.get_metadata("module_activation_plan", [])
         findings = session.database.list_findings()
         active = sum(1 for item in plan if isinstance(item, dict) and item.get("activation") in {"active", "limited"})
@@ -248,6 +250,12 @@ class ConsoleUi:
             table.add_row("Unreachable", str(coverage.get("unreachable", 0)))
             table.add_row("Discovery-only", str(coverage.get("discovery_only", 0)))
             table.add_row("Imported-only", str(coverage.get("imported_evidence_only", 0)))
+            table.add_row("Remote strategy", str(remote.get("strategy", "not evaluated")))
+            table.add_row("Windows candidates", str(remote.get("windows_candidates", 0)))
+            table.add_row("Remote attempted", str(remote.get("collection_attempted", 0)))
+            table.add_row("Remote successful", str(remote.get("collection_successful", 0)))
+            table.add_row("Remote failed", str(remote.get("collection_failed", 0)))
+            table.add_row("Top failure reason", str(remote.get("top_failure_reason", "none") or "none"))
             table.add_row("Active modules", str(active))
             table.add_row("Skipped/not configured", str(skipped))
             table.add_row(
@@ -264,6 +272,12 @@ class ConsoleUi:
             f"Unreachable: {coverage.get('unreachable', 0)}",
             f"Discovery-only: {coverage.get('discovery_only', 0)}",
             f"Imported-only: {coverage.get('imported_evidence_only', 0)}",
+            f"Remote strategy: {remote.get('strategy', 'not evaluated')}",
+            f"Windows candidates: {remote.get('windows_candidates', 0)}",
+            f"Remote attempted: {remote.get('collection_attempted', 0)}",
+            f"Remote successful: {remote.get('collection_successful', 0)}",
+            f"Remote failed: {remote.get('collection_failed', 0)}",
+            f"Top failure reason: {remote.get('top_failure_reason', 'none') or 'none'}",
             f"Active modules: {active}",
             f"Skipped/not configured: {skipped}",
             "Findings: C:{critical} H:{high} M:{medium} L:{low} I:{info}".format(**severity),

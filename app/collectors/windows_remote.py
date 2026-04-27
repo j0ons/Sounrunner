@@ -210,6 +210,8 @@ def _categorize_remote_failure(evidence: WindowsEvidence) -> tuple[str, str]:
             if section.stderr
         ]
     ).lower()
+    if "authentication failed" in blob or "logon failure" in blob or "the user name or password is incorrect" in blob:
+        return "auth_failed", "Confirm the current user or approved credential can authenticate to the remote host over WinRM."
     if "access is denied" in blob or "unauthorized" in blob:
         return "access_denied", "Confirm the approved credential has WinRM and read access on the remote host."
     if "cannot resolve" in blob or "name could not be resolved" in blob:

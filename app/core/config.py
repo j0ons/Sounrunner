@@ -216,6 +216,10 @@ class RemoteWindowsConfig:
     """Read-only remote Windows collection settings."""
 
     enabled: bool = False
+    auto_current_user: bool = True
+    attempt_current_user_when_domain_joined: bool = True
+    require_winrm_port_observed: bool = True
+    max_auto_attempts: int = 50
     transport: str = "winrm"
     username: str = ""
     password_env: str = "SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD"
@@ -443,6 +447,8 @@ class AppConfig:
             raise ValueError("orchestration.ad_computer_timeout_seconds must be greater than zero.")
         if self.remote_windows.transport not in {"winrm"}:
             raise ValueError("remote_windows.transport must be winrm.")
+        if self.remote_windows.max_auto_attempts < 1 or self.remote_windows.max_auto_attempts > 1000:
+            raise ValueError("remote_windows.max_auto_attempts must be between 1 and 1000.")
         if self.remote_windows.auth not in {"default", "negotiate", "kerberos", "basic"}:
             raise ValueError(
                 "remote_windows.auth must be default, negotiate, kerberos, or basic."

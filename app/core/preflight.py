@@ -78,6 +78,7 @@ def run_preflight(
     checks.append(_admin_context_check())
     checks.append(_nmap_check(config))
     checks.append(_auto_scope_detection_check(config))
+    checks.append(_current_user_remote_auth_check(config))
     checks.append(_secret_sources_check(config))
     checks.extend(_remote_windows_checks(config))
     checks.append(_estate_readiness_check(config))
@@ -244,6 +245,51 @@ def _auto_scope_detection_check(config: AppConfig | None) -> PreflightCheck:
         name="auto_scope_detection",
         status=status,
         detail=auto_scope_debug_summary(context),
+    )
+
+
+def _current_user_remote_auth_check(config: AppConfig | None) -> PreflightCheck:
+    if not config:
+        return PreflightCheck(
+            name="remote_auth_strategy",
+            status="skipped",
+            detail="Config unavailable.",
+        )
+    try:
+        context = detect_enterprise_context(config)
+    except Exception as exc:  # noqa: BLE001
+        return PreflightCheck(
+            name="remote_auth_strategy",
+            status="warning",
+            detail=f"Could not evaluate current-user remote auth strategy: {exc}",
+        )
+    domain_joined = bool(context.domain_joined)
+    domain = context.ad_domain or context.domain_name
+    current_user_available = bool(
+        config.remote_windows.auto_current_user
+        and config.remote_windows.attempt_current_user_when_domain_joined
+        and is_windows()
+        and powershell_available()
+        and (domain_joined or domain)
+    )
+    configured = bool(config.remote_windows.enabled and config.remote_windows.username)
+    if configured:
+        status = "ok"
+        strategy = "configured_credentials"
+    elif current_user_available:
+        status = "ok"
+        strategy = "current_user_integrated_auth"
+    else:
+        status = "warning"
+        strategy = "discovery_only_fallback"
+    return PreflightCheck(
+        name="remote_auth_strategy",
+        status=status,
+        detail=(
+            f"domain_joined={'yes' if domain_joined else 'no'}; domain={domain or 'none'}; "
+            f"current_user={context.operator_name}; powershell_remoting_local={'yes' if powershell_available() else 'no'}; "
+            f"current_auth_available={'yes' if current_user_available else 'no'}; strategy={strategy}."
+        ),
     )
 
 
@@ -468,12 +514,20 @@ def _secret_sources_check(config: AppConfig | None) -> PreflightCheck:
 
 
 def _remote_windows_checks(config: AppConfig | None) -> list[PreflightCheck]:
-    if not config or not config.remote_windows.enabled:
+    if not config:
         return [
             PreflightCheck(
                 name="remote_windows",
                 status="skipped",
-                detail="Remote Windows collection not enabled.",
+                detail="Config unavailable.",
+            )
+        ]
+    if not config.remote_windows.enabled and not config.remote_windows.auto_current_user:
+        return [
+            PreflightCheck(
+                name="remote_windows",
+                status="skipped",
+                detail="Remote Windows collection disabled and current-user auto strategy disabled.",
             )
         ]
     if not is_windows():
@@ -481,7 +535,7 @@ def _remote_windows_checks(config: AppConfig | None) -> list[PreflightCheck]:
             PreflightCheck(
                 name="remote_windows",
                 status="warning",
-                detail="Remote Windows collection is configured but the runner is not executing on Windows.",
+                detail="Remote Windows collection requires execution on Windows.",
             )
         ]
     checks = [
@@ -489,7 +543,8 @@ def _remote_windows_checks(config: AppConfig | None) -> list[PreflightCheck]:
             name="remote_windows",
             status="ok",
             detail=(
-                f"Remote Windows collection configured for WinRM on port {config.remote_windows.port} "
+                f"Remote Windows collection can use WinRM on port {config.remote_windows.port}; "
+                f"configured_enabled={config.remote_windows.enabled} auto_current_user={config.remote_windows.auto_current_user} "
                 f"auth={config.remote_windows.auth} ssl={config.remote_windows.use_ssl}."
             ),
         )

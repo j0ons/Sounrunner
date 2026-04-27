@@ -105,6 +105,20 @@ class ReportGenerator:
                     styles["Normal"],
                 )
             )
+            remote_summary = self.session.database.get_metadata("remote_collection_summary", {})
+            if isinstance(remote_summary, dict) and remote_summary:
+                story.append(
+                    Paragraph(
+                        "Remote collection strategy: "
+                        f"{remote_summary.get('strategy', 'not evaluated')} | "
+                        f"Windows candidates: {remote_summary.get('windows_candidates', 0)} | "
+                        f"Attempted: {remote_summary.get('collection_attempted', 0)} | "
+                        f"Successful: {remote_summary.get('collection_successful', 0)} | "
+                        f"Failed: {remote_summary.get('collection_failed', 0)} | "
+                        f"Top failure: {remote_summary.get('top_failure_reason', 'none') or 'none'}",
+                        styles["Normal"],
+                    )
+                )
             site_rows = _coverage_rows(estate.get("by_site", {}), "Site")
             if site_rows:
                 story.append(Paragraph("Coverage By Site", styles["Heading3"]))
@@ -335,6 +349,8 @@ class ReportGenerator:
         story.append(Paragraph(f"Callback/export status: {appendix['callback_summary']}", styles["Normal"]))
         story.append(Paragraph(f"Evidence manifest entries: {appendix['manifest_entry_count']}", styles["Normal"]))
         story.append(Paragraph(f"Finding correlation: {appendix['correlation_summary']}", styles["Normal"]))
+        story.append(Paragraph(f"Remote collection strategy: {appendix['remote_collection_strategy']}", styles["Normal"]))
+        story.append(Paragraph(f"Remote collection summary: {appendix['remote_collection_summary']}", styles["Normal"]))
         if appendix["assessment_warnings"]:
             story.append(
                 Paragraph(
@@ -492,6 +508,8 @@ class ReportGenerator:
                         "assessment_plan": self.session.database.get_metadata("assessment_plan", {}),
                         "assessment_warnings": self.session.database.get_metadata("assessment_warnings", []),
                         "launch_context": self.session.database.get_metadata("launch_context", {}),
+                        "remote_collection_strategy": self.session.database.get_metadata("remote_collection_strategy", {}),
+                        "remote_collection_summary": self.session.database.get_metadata("remote_collection_summary", {}),
                         "inventory_assets": self.session.database.get_metadata("inventory_assets", []),
                         "module_statuses": [
                             {
@@ -622,6 +640,8 @@ def _appendix_payload(
     activation_plan = session.database.get_metadata("module_activation_plan", [])
     assessment_plan = session.database.get_metadata("assessment_plan", {})
     assessment_warnings = session.database.get_metadata("assessment_warnings", [])
+    remote_strategy = session.database.get_metadata("remote_collection_strategy", {})
+    remote_summary = session.database.get_metadata("remote_collection_summary", {})
     manifest_entries = _manifest_entries(session)
     import_sources = sorted(
         {
@@ -650,6 +670,8 @@ def _appendix_payload(
         "correlation_summary": (
             f"merged={correlation.get('merged_count', 0)} suppressed={correlation.get('suppressed_count', 0)}"
         ),
+        "remote_collection_strategy": _remote_strategy_summary(remote_strategy),
+        "remote_collection_summary": _remote_summary_text(remote_summary),
         "activation_plan": activation_plan if isinstance(activation_plan, list) else [],
         "assessment_warnings": assessment_warnings if isinstance(assessment_warnings, list) else [],
         "discovery_sources": assessment_plan.get("discovery_sources", []) if isinstance(assessment_plan, dict) else [],
@@ -728,6 +750,31 @@ def _count_rows(payload: object, label: str, value_label: str) -> list[list[str]
     for key, value in payload.items():
         rows.append([str(key), str(value)])
     return rows
+
+
+def _remote_strategy_summary(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return "not evaluated"
+    return (
+        f"{payload.get('mode', 'unknown')} "
+        f"(reason={payload.get('reason', 'none')}; "
+        f"domain_joined={payload.get('domain_joined', False)}; "
+        f"current_user_context={payload.get('current_user_context', False)}; "
+        f"require_winrm_port_observed={payload.get('require_winrm_port_observed', True)})"
+    )
+
+
+def _remote_summary_text(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return "not evaluated"
+    return (
+        f"windows_candidates={payload.get('windows_candidates', 0)}; "
+        f"attempted={payload.get('collection_attempted', 0)}; "
+        f"successful={payload.get('collection_successful', 0)}; "
+        f"partial={payload.get('collection_partial', 0)}; "
+        f"failed={payload.get('collection_failed', 0)}; "
+        f"top_failure={payload.get('top_failure_reason', 'none') or 'none'}"
+    )
 
 
 def _basis_display(basis: str) -> str:

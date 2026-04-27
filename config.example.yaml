@@ -33,6 +33,12 @@ orchestration:
   ad_computer_timeout_seconds: 30
 remote_windows:
   enabled: false
+  # Standard/Advanced can attempt current-user integrated WinRM automatically when domain context exists.
+  # This does not prompt for, store, or collect passwords.
+  auto_current_user: true
+  attempt_current_user_when_domain_joined: true
+  require_winrm_port_observed: true
+  max_auto_attempts: 50
   transport: "winrm"
   username: ""
   password_env: "SOUN_RUNNER_REMOTE_WINDOWS_PASSWORD"

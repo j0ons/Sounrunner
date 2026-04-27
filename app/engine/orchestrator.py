@@ -17,6 +17,11 @@ from app.core.inventory import AssetInventory, AssetRecord
 from app.core.models import Finding, ModuleResult
 from app.core.session import AssessmentSession
 from app.engine.aggregation import estate_summary
+from app.engine.remote_strategy import (
+    RemoteCollectionStrategy,
+    effective_remote_windows_config,
+    plan_remote_collection_strategy,
+)
 from app.modules.endpoint import build_endpoint_findings
 from app.modules.identity import build_identity_findings
 from app.modules.network_lite import build_local_exposure_findings
@@ -107,29 +112,34 @@ class EstateAssessmentModule:
             },
         )
 
-        planned_targets, eligible_records, planning_notes = self._plan_remote_targets(inventory)
+        strategy = plan_remote_collection_strategy(session=self.session, config=self.config)
+        self.session.database.set_metadata("remote_collection_strategy", strategy.to_metadata())
+        details.append(f"Remote collection strategy={strategy.mode}; {strategy.reason}")
+
+        planned_targets, eligible_records, planning_notes = self._plan_remote_targets(inventory, strategy)
         details.extend(planning_notes)
         remote_outcomes: list[HostCollectionOutcome] = []
-        if self.config.remote_windows.enabled and planned_targets:
+        if strategy.enabled and planned_targets:
             remote_outcomes = self._collect_remote_hosts(
                 inventory=inventory,
                 planned_targets=planned_targets,
+                strategy=strategy,
             )
             for outcome in remote_outcomes:
                 findings.extend(outcome.findings)
                 evidence_files.extend(outcome.evidence_files)
                 details.append(f"{outcome.asset.display_name}: {outcome.status} - {outcome.detail}")
         else:
-            details.append("Remote Windows collection disabled or no eligible estate targets were planned.")
+            details.append("Remote Windows collection unavailable or no eligible estate targets were planned.")
             self._mark_uncollected_targets(
                 inventory=inventory,
                 records=eligible_records,
                 reason=(
-                    "Remote collection disabled or no eligible remote collection configuration."
-                    if not self.config.remote_windows.enabled
+                    f"Remote collection strategy unavailable: {strategy.reason}"
+                    if not strategy.enabled
                     else "No eligible remote Windows targets were planned from approved evidence sources."
                 ),
-                error_state="" if self.config.remote_windows.enabled else "remote_collection_disabled",
+                error_state="" if strategy.enabled else "remote_collection_unavailable",
             )
 
         baseline_findings = self.session.database.list_findings()
@@ -152,7 +162,13 @@ class EstateAssessmentModule:
                 "in_scope_assets": len(eligible_assets),
                 "eligible_remote_assets": len(eligible_records),
                 "planned_remote_targets": len(planned_targets),
+                "remote_collection_strategy": strategy.to_metadata(),
+                "remote_collection_summary": _remote_collection_summary(remote_outcomes, strategy, len(eligible_records), len(planned_targets)),
             },
+        )
+        self.session.database.set_metadata(
+            "remote_collection_summary",
+            _remote_collection_summary(remote_outcomes, strategy, len(eligible_records), len(planned_targets)),
         )
         status = _estate_status(discovery_result.status, remote_outcomes, inventory.list_assets())
         logger.info(
@@ -176,8 +192,12 @@ class EstateAssessmentModule:
         *,
         inventory: AssetInventory,
         planned_targets: list[tuple[str, AssetRecord]],
+        strategy: RemoteCollectionStrategy,
     ) -> list[HostCollectionOutcome]:
-        collector = RemoteWindowsCollector(self.session, self.config.remote_windows)
+        collector = RemoteWindowsCollector(
+            self.session,
+            effective_remote_windows_config(self.config.remote_windows, strategy),
+        )
         outcomes: list[HostCollectionOutcome] = []
         with ThreadPoolExecutor(max_workers=self.config.orchestration.max_workers) as executor:
             futures = {
@@ -225,6 +245,7 @@ class EstateAssessmentModule:
     def _plan_remote_targets(
         self,
         inventory: AssetInventory,
+        strategy: RemoteCollectionStrategy,
     ) -> tuple[list[tuple[str, AssetRecord]], list[AssetRecord], list[str]]:
         records = inventory.list_assets()
         planned: list[tuple[str, AssetRecord]] = []
@@ -234,7 +255,7 @@ class EstateAssessmentModule:
         skipped = 0
         reason_counts: dict[str, int] = {}
         for record in records:
-            eligibility = self._remote_collection_eligibility(record)
+            eligibility = self._remote_collection_eligibility(record, strategy)
             inventory.update_remoting_eligibility(
                 record.asset_id,
                 eligible=eligibility["eligible"],
@@ -242,6 +263,18 @@ class EstateAssessmentModule:
             )
             if not eligibility["eligible"]:
                 reason_counts[eligibility["reason"]] = reason_counts.get(eligibility["reason"], 0) + 1
+                inventory.mark_status(
+                    record.asset_id,
+                    assessment_status=record.assessment_status or "discovery_only",
+                    collector_status="skipped",
+                    error_state=_reason_code(str(eligibility["reason"])),
+                )
+                self.session.database.upsert_asset_module_status(
+                    record.asset_id,
+                    "remote_windows_collection",
+                    "skipped",
+                    str(eligibility["reason"]),
+                )
                 continue
             eligible_records.append(inventory.find_asset(record.asset_id) or record)
             target = self._resolve_remote_target(record, inventory)
@@ -263,6 +296,11 @@ class EstateAssessmentModule:
                 continue
             seen_targets.add(target.lower())
             planned.append((target, inventory.find_asset(record.asset_id) or record))
+            if len(planned) >= strategy.max_auto_attempts:
+                notes.append(
+                    f"Remote collection planning reached max_auto_attempts={strategy.max_auto_attempts}; remaining eligible assets stay discovery-only."
+                )
+                break
         notes.append(
             f"Remote collection planning considered {len(records)} inventory asset(s) and queued {len(planned)} target(s)."
         )
@@ -278,21 +316,30 @@ class EstateAssessmentModule:
             )
         return planned, eligible_records, notes
 
-    def _remote_collection_eligibility(self, record: AssetRecord) -> dict[str, str | bool]:
+    def _remote_collection_eligibility(
+        self,
+        record: AssetRecord,
+        strategy: RemoteCollectionStrategy,
+    ) -> dict[str, str | bool]:
+        if not strategy.enabled:
+            return {
+                "eligible": False,
+                "reason": "skipped_discovery_only: no safe remote collection strategy is available.",
+            }
         if record.discovery_source == "local_environment_profile":
             return {
                 "eligible": False,
-                "reason": "Local host baseline is already collected directly and is not queued for remote collection.",
+                "reason": "skipped_discovery_only: local host baseline is already collected directly.",
             }
         if record.asset_role == "network_device":
             return {
                 "eligible": False,
-                "reason": "Network devices are out of scope for the Windows remote collector.",
+                "reason": "not_windows_candidate: network devices are out of scope for the Windows remote collector.",
             }
         if record.collector_status == "complete" and record.assessment_status == "assessed":
             return {
                 "eligible": False,
-                "reason": "Asset already has complete direct collection evidence.",
+                "reason": "skipped_discovery_only: asset already has complete direct collection evidence.",
             }
         os_blob = f"{record.os_family} {record.os_guess}".lower()
         if os_blob and "windows" not in os_blob and record.asset_role not in {
@@ -303,11 +350,24 @@ class EstateAssessmentModule:
         }:
             return {
                 "eligible": False,
-                "reason": "Available asset evidence does not indicate a Windows-compatible remote collection target.",
+                "reason": "not_windows_candidate: available evidence does not indicate a Windows-compatible remote collection target.",
+            }
+        services = self.session.database.list_asset_services(record.asset_id)
+        ports = {int(item.get("port", 0)) for item in services if str(item.get("state", "")).lower() in {"open", "open|filtered", ""}}
+        if ports and not _windows_candidate_ports(ports) and record.asset_role == "unknown":
+            return {
+                "eligible": False,
+                "reason": "not_windows_candidate: discovered services do not look Windows-compatible.",
+            }
+        has_winrm = bool({5985, 5986} & ports)
+        if strategy.require_winrm_port_observed and not has_winrm:
+            return {
+                "eligible": False,
+                "reason": "no_winrm_service_detected: WinRM port 5985/5986 was not observed in approved discovery evidence.",
             }
         return {
             "eligible": True,
-            "reason": "Asset is in scope and has no complete direct Windows collection evidence yet.",
+            "reason": "eligible: asset is in scope, Windows-compatible, and has observed WinRM or policy allows attempt.",
         }
 
     def _resolve_remote_target(
@@ -518,6 +578,14 @@ def _normalize_remote_status(result: RemoteWindowsCollectionResult) -> dict[str,
             "failure_category": "dns_resolution",
             "operator_hint": "Confirm hostname resolution or use the approved IP address for the remote host.",
         }
+    if "authentication failed" in detail_blob or "logon failure" in detail_blob or "user name or password is incorrect" in detail_blob or "auth_failed" in detail_blob:
+        return {
+            "assessment_status": "partial",
+            "collector_status": "denied",
+            "error_state": "auth_failed",
+            "failure_category": "auth_failed",
+            "operator_hint": "Confirm the current user or approved credential can authenticate to the remote host over WinRM.",
+        }
     if "access is denied" in detail_blob or "unauthorized" in detail_blob or "credential" in detail_blob:
         return {
             "assessment_status": "partial",
@@ -557,6 +625,40 @@ def _normalize_remote_status(result: RemoteWindowsCollectionResult) -> dict[str,
         "failure_category": result.failure_category or "partial_remote_evidence",
         "operator_hint": result.operator_hint or "Review remote evidence stderr for command-level blockers.",
     }
+
+
+def _remote_collection_summary(
+    outcomes: list[HostCollectionOutcome],
+    strategy: RemoteCollectionStrategy,
+    candidate_count: int,
+    planned_count: int,
+) -> dict[str, object]:
+    failure_counts: dict[str, int] = {}
+    for outcome in outcomes:
+        if outcome.failure_category:
+            failure_counts[outcome.failure_category] = failure_counts.get(outcome.failure_category, 0) + 1
+    top_failure = ""
+    if failure_counts:
+        top_failure = sorted(failure_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
+    return {
+        "strategy": strategy.mode,
+        "strategy_reason": strategy.reason,
+        "windows_candidates": candidate_count,
+        "collection_attempted": planned_count,
+        "collection_successful": sum(1 for item in outcomes if item.status == "complete"),
+        "collection_partial": sum(1 for item in outcomes if item.status == "partial"),
+        "collection_failed": sum(1 for item in outcomes if item.status not in {"complete", "partial"}),
+        "failure_counts": failure_counts,
+        "top_failure_reason": top_failure,
+    }
+
+
+def _windows_candidate_ports(ports: set[int]) -> bool:
+    return bool(ports & {135, 139, 445, 3389, 5985, 5986})
+
+
+def _reason_code(reason: str) -> str:
+    return reason.split(":", 1)[0].strip() if ":" in reason else reason.strip()
 
 
 def _estate_status(
