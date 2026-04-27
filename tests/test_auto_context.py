@@ -299,9 +299,130 @@ def test_auto_context_real_windows_lab_adapter_list_selects_physical_ethernet(mo
     assert context.scope_source != "localhost_only_fallback"
 
 
+def test_windows_get_netipaddress_payload_selects_lab_ethernet_without_netipconfiguration() -> None:
+    interfaces = auto_context._interfaces_from_windows_payload(
+        {
+            "items": [
+                _win_row("Ethernet 2", "VirtualBox Host-Only Ethernet Adapter", "192.168.56.1", 24),
+                _win_row("vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter", "172.23.192.1", 20),
+                _win_row("VMware Network Adapter VMnet8", "VMware Virtual Ethernet Adapter", "192.168.126.1", 24),
+                _win_row("VMware Network Adapter VMnet1", "VMware Virtual Ethernet Adapter", "192.168.80.1", 24),
+                _win_row("Local Area Connection* 10", "", "169.254.80.225", 16),
+                _win_row("Local Area Connection* 9", "", "169.254.82.73", 16),
+                _win_row(
+                    "Ethernet",
+                    "Realtek PCIe GbE Family Controller",
+                    "10.0.180.153",
+                    24,
+                    gateway="10.0.180.1",
+                    primary=True,
+                    route_metric=5,
+                    interface_metric=10,
+                ),
+                _win_row("Wi-Fi", "Intel(R) Wi-Fi 6 AX201", "169.254.187.87", 16),
+                _win_row("Tailscale", "Tailscale Tunnel", "100.120.104.80", 32),
+            ]
+        }
+    )
+
+    selected, diagnostics = auto_context._select_auto_scope_interfaces(interfaces, AppConfig())
+    by_name = {item["name"]: item for item in diagnostics}
+
+    assert selected[0].subnet == "10.0.180.0/24"
+    assert selected[0].name == "Ethernet"
+    assert by_name["Ethernet"]["decision"] == "selected"
+    assert by_name["Tailscale"]["decision"] == "ignored"
+    assert "CGNAT" in str(by_name["Tailscale"]["reason"]) or "virtual/VPN" in str(by_name["Tailscale"]["reason"])
+    assert by_name["VMware Network Adapter VMnet8"]["decision"] == "ignored"
+    assert by_name["vEthernet (Default Switch)"]["decision"] == "ignored"
+    assert by_name["Local Area Connection* 10"]["decision"] == "ignored"
+    assert by_name["Wi-Fi"]["decision"] == "ignored"
+
+
+def test_windows_status_blank_valid_ethernet_with_default_route_is_selected() -> None:
+    interfaces = auto_context._interfaces_from_windows_payload(
+        {
+            "items": [
+                _win_row(
+                    "Ethernet",
+                    "Intel(R) Ethernet Connection",
+                    "10.0.180.153",
+                    24,
+                    status="",
+                    gateway="10.0.180.1",
+                    primary=True,
+                    route_metric=1,
+                    interface_metric=1,
+                )
+            ]
+        }
+    )
+
+    selected, diagnostics = auto_context._select_auto_scope_interfaces(interfaces, AppConfig())
+
+    assert selected[0].subnet == "10.0.180.0/24"
+    assert diagnostics[0]["decision"] == "selected"
+
+
+def test_auto_scope_debug_report_includes_final_selected_scope(monkeypatch) -> None:
+    _patch_detection(
+        monkeypatch,
+        [
+            DetectedInterface(
+                name="Ethernet",
+                description="Realtek PCIe GbE Family Controller",
+                ip_address="10.0.180.153",
+                prefix_length=24,
+                subnet="10.0.180.0/24",
+                gateway="10.0.180.1",
+                has_default_gateway=True,
+                is_primary_route=True,
+                status="Up",
+            )
+        ],
+    )
+
+    context = auto_context.detect_enterprise_context(AppConfig())
+    report = auto_context.auto_scope_debug_report(context)
+
+    assert "final_selected_scope=10.0.180.0/24" in report
+    assert "adapter=Ethernet" in report
+    assert "decision=selected" in report
+
+
 def _patch_detection(monkeypatch, interfaces: list[DetectedInterface]) -> None:
     monkeypatch.setattr(auto_context, "is_windows", lambda: False)
     monkeypatch.setattr(auto_context, "_detect_non_windows_interfaces", lambda: interfaces)
     monkeypatch.setattr(auto_context.socket, "gethostname", lambda: "runner01")
     monkeypatch.setattr(auto_context.socket, "getfqdn", lambda: "runner01.corp.example.com")
     monkeypatch.setattr(auto_context.getpass, "getuser", lambda: "Operator")
+
+
+def _win_row(
+    alias: str,
+    description: str,
+    ip: str,
+    prefix: int,
+    *,
+    status: str = "Up",
+    gateway: str = "",
+    primary: bool = False,
+    route_metric: int = 999999,
+    interface_metric: int = 999999,
+) -> dict[str, object]:
+    return {
+        "Source": "Get-NetIPAddress",
+        "InterfaceAlias": alias,
+        "InterfaceIndex": abs(hash(alias)) % 1000,
+        "InterfaceDescription": description,
+        "Status": status,
+        "AdapterType": "Ethernet",
+        "IPv4Address": ip,
+        "PrefixLength": prefix,
+        "IPv4DefaultGateway": gateway,
+        "DnsSuffix": "corp.example.local" if gateway else "",
+        "HasDefaultGateway": bool(gateway),
+        "IsPrimaryRoute": primary,
+        "RouteMetric": route_metric,
+        "InterfaceMetric": interface_metric,
+    }

@@ -12,6 +12,7 @@ from app import __version__
 from app.core.auto_context import (
     AutoEnterpriseContext,
     apply_auto_context_to_config,
+    auto_scope_debug_report,
     detect_enterprise_context,
 )
 from app.core.config import AppConfig
@@ -121,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run compact startup validation and exit with non-zero only on fatal failures.",
     )
     parser.add_argument(
+        "--debug-auto-scope",
+        action="store_true",
+        help="Print raw auto-scope adapter decisions and exit.",
+    )
+    parser.add_argument(
         "--report-mode",
         type=str,
         default="",
@@ -171,6 +177,16 @@ def main() -> int:
 
     if args.version:
         print(f"Soun Al Hosn Assessment Runner {__version__}")
+        return 0
+
+    if args.debug_auto_scope:
+        try:
+            config = AppConfig.load(args.config, data_dir=args.data_dir, log_dir=args.log_dir)
+            context = detect_enterprise_context(config)
+        except Exception as exc:  # noqa: BLE001 - debug command must report exact blocker.
+            print(f"Auto-scope debug failed: {exc}")
+            return 1
+        print(auto_scope_debug_report(context))
         return 0
 
     ui = ConsoleUi(app_version=__version__)

@@ -78,6 +78,8 @@ RFC1918_NETWORKS = (
     ipaddress.ip_network("192.168.0.0/16"),
 )
 
+CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
 VIRTUAL_ADAPTER_KEYWORDS = (
     "docker",
     "wsl",
@@ -202,38 +204,50 @@ def _detect_windows_context() -> dict[str, object]:
     )
     net_info, _ = powershell_json(
         """
-$routes = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
-    Sort-Object RouteMetric, InterfaceMetric
-$primary = $routes | Select-Object -First 1
+$ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+$routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Sort-Object RouteMetric, InterfaceMetric)
+$primary = $routes | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Select-Object -First 1
+if (-not $primary) {
+    $primary = $routes | Select-Object -First 1
+}
 $adapters = @{}
 Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object {
     $adapters[[int]$_.ifIndex] = $_
 }
-Get-NetIPConfiguration -ErrorAction SilentlyContinue | ForEach-Object {
-    $cfg = $_
-    $adapter = $adapters[[int]$cfg.InterfaceIndex]
-    $route = $routes | Where-Object { $_.InterfaceIndex -eq $cfg.InterfaceIndex } | Select-Object -First 1
-    $gateway = ''
-    if ($cfg.IPv4DefaultGateway -and $cfg.IPv4DefaultGateway.NextHop) {
-        $gateway = [string]$cfg.IPv4DefaultGateway.NextHop
+$dns = @{}
+Get-DnsClient -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.InterfaceIndex -ne $null) {
+        $dns[[int]$_.InterfaceIndex] = $_
     }
-    foreach ($address in @($cfg.IPv4Address)) {
-        if (-not $address.IPAddress) { continue }
+}
+$ipRows | ForEach-Object {
+    $ip = $_
+    $ifIndex = [int]$ip.InterfaceIndex
+    $adapter = $adapters[$ifIndex]
+    $dnsClient = $dns[$ifIndex]
+    $route = $routes | Where-Object { $_.InterfaceIndex -eq $ifIndex } | Select-Object -First 1
+    $gateway = ''
+    if ($route -and $route.NextHop -and $route.NextHop -ne '0.0.0.0') {
+        $gateway = [string]$route.NextHop
+    }
+    if ($ip.IPAddress) {
         [pscustomobject]@{
-            InterfaceAlias = [string]$cfg.InterfaceAlias
-            InterfaceIndex = [int]$cfg.InterfaceIndex
+            Source = 'Get-NetIPAddress'
+            InterfaceAlias = [string]$ip.InterfaceAlias
+            InterfaceIndex = $ifIndex
             InterfaceDescription = if ($adapter) { [string]$adapter.InterfaceDescription } else { '' }
             Status = if ($adapter) { [string]$adapter.Status } else { '' }
             AdapterType = if ($adapter) { [string]$adapter.MediaType } else { '' }
-            IPv4Address = [string]$address.IPAddress
-            PrefixLength = [int]$address.PrefixLength
+            IPv4Address = [string]$ip.IPAddress
+            PrefixLength = [int]$ip.PrefixLength
             IPv4DefaultGateway = $gateway
-            DnsSuffix = [string]$cfg.DnsSuffix
+            DnsSuffix = if ($dnsClient) { [string]$dnsClient.ConnectionSpecificSuffix } else { '' }
             HasDefaultGateway = [bool]$gateway
-            IsPrimaryRoute = [bool]($primary -and $primary.InterfaceIndex -eq $cfg.InterfaceIndex)
+            IsPrimaryRoute = [bool]($primary -and $primary.InterfaceIndex -eq $ifIndex)
             RouteMetric = if ($route) { [int]$route.RouteMetric } else { 999999 }
             InterfaceMetric = if ($route) { [int]$route.InterfaceMetric } else { 999999 }
+            AddressState = [string]$ip.AddressState
         }
     }
 }
@@ -444,6 +458,8 @@ def _ignore_reason(interface: DetectedInterface, allowed_keywords: list[str]) ->
         return "loopback"
     if ip.is_link_local:
         return "APIPA/link-local"
+    if ip in CGNAT_NETWORK:
+        return "CGNAT/Tailscale address"
     if not _is_rfc1918_private(ip):
         return "not RFC1918 private"
     if not interface.subnet:
@@ -534,11 +550,13 @@ def _adapter_diagnostic(
     return {
         "name": interface.name,
         "description": interface.description,
+        "adapter_type": interface.adapter_type,
         "ip_address": interface.ip_address,
         "prefix_length": interface.prefix_length,
         "subnet": interface.subnet,
         "gateway": interface.gateway,
         "status": interface.status,
+        "has_default_gateway": interface.has_default_gateway,
         "is_primary_route": interface.is_primary_route,
         "route_metric": interface.route_metric,
         "interface_metric": interface.interface_metric,
@@ -712,3 +730,42 @@ def auto_scope_debug_summary(context: AutoEnterpriseContext) -> str:
         f"candidate_adapters={'; '.join(candidates[:5]) if candidates else 'none'}; "
         f"ignored_adapters={'; '.join(ignored[:8]) if ignored else 'none'}"
     )
+
+
+def auto_scope_debug_report(context: AutoEnterpriseContext) -> str:
+    """Return multi-line raw auto-scope debug output for operator troubleshooting."""
+
+    lines = [
+        "Auto-scope debug",
+        f"scope_source={context.scope_source}",
+        f"final_selected_scope={context.default_scope}",
+        f"selected_interface={context.selected_interface_alias}",
+        f"selected_ip={context.selected_ip}",
+        f"selected_prefix={context.selected_prefix_length}",
+        f"selected_cidr={context.selected_cidr}",
+        f"confidence={context.auto_scope_confidence}",
+        "",
+        "Raw adapter rows from Get-NetIPAddress/Get-NetAdapter/Get-NetRoute/Get-DnsClient:",
+    ]
+    for item in context.adapter_diagnostics:
+        lines.append(
+            "- adapter={name}; description={description}; status={status}; "
+            "ip={ip}/{prefix}; calculated_cidr={cidr}; gateway={gateway}; "
+            "default_route={primary}; route_metric={route_metric}; interface_metric={interface_metric}; "
+            "decision={decision}; reason={reason}; confidence={confidence}".format(
+                name=item.get("name", ""),
+                description=item.get("description", ""),
+                status=item.get("status", ""),
+                ip=item.get("ip_address", ""),
+                prefix=item.get("prefix_length", ""),
+                cidr=item.get("subnet", ""),
+                gateway=item.get("gateway", ""),
+                primary=item.get("is_primary_route", False),
+                route_metric=item.get("route_metric", ""),
+                interface_metric=item.get("interface_metric", ""),
+                decision=item.get("decision", ""),
+                reason=item.get("reason", ""),
+                confidence=item.get("confidence_score", ""),
+            )
+        )
+    return "\n".join(lines)

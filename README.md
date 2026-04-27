@@ -274,6 +274,16 @@ Preflight includes an `auto_scope_detection` row showing detected adapters, igno
 
 Detected enterprise context includes hostname, FQDN, domain join state, DNS suffixes, local site heuristic, inferred AD domain, inferred email domain, and directly connected private subnets.
 
+Windows auto-scope uses merged read-only evidence from `Get-NetIPAddress`, `Get-NetAdapter`, `Get-NetRoute`, and `Get-DnsClient`. It prefers the physical Ethernet/Wi-Fi adapter on the active default IPv4 route and ignores APIPA, loopback, CGNAT/Tailscale, Hyper-V/vEthernet, VMware, VirtualBox, Docker, WSL, VPN, host-only, and NAT-only adapters unless explicitly allowed.
+
+Debug auto-scope decisions without starting an assessment:
+
+```powershell
+python .\main.py --debug-auto-scope
+```
+
+The debug output shows raw adapter rows, calculated CIDR, default-route status, ignored/selected decision, ignore reason, and final selected scope.
+
 ## Automatic Module Activation
 
 Standard and Advanced no longer behave like fixed prompt-driven scripts. They activate modules from config and evidence availability.
