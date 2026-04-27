@@ -50,6 +50,29 @@ class NmapConfig:
 
 
 @dataclass(slots=True)
+class NetworkAssessmentConfig:
+    """Enterprise network assessment settings."""
+
+    enabled: bool = True
+    profile: str = "exposure"
+    include_service_version_detection: bool = False
+    include_deep_safe_scripts: bool = False
+    approved_safe_scripts: list[str] = field(default_factory=list)
+    max_hosts: int = 4096
+    max_ports_per_host: int = 200
+    scan_timeout_seconds: int = 600
+    classify_network_devices: bool = True
+    infer_segmentation: bool = True
+    require_config_evidence_for_confirmed_segmentation: bool = True
+    management_ports: list[int] = field(
+        default_factory=lambda: [22, 23, 80, 443, 3389, 5985, 5986, 5900, 8080, 8443]
+    )
+    database_ports: list[int] = field(
+        default_factory=lambda: [1433, 3306, 5432, 6379, 27017, 9200]
+    )
+
+
+@dataclass(slots=True)
 class StandardConfig:
     """Standard package settings."""
 
@@ -329,6 +352,7 @@ class AppConfig:
     advanced: AdvancedConfig = field(default_factory=AdvancedConfig)
     callback: CallbackConfig = field(default_factory=CallbackConfig)
     m365_entra: M365EntraConfig = field(default_factory=M365EntraConfig)
+    network_assessment: NetworkAssessmentConfig = field(default_factory=NetworkAssessmentConfig)
     assessment: AssessmentDefaults = field(default_factory=AssessmentDefaults)
     orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     remote_windows: RemoteWindowsConfig = field(default_factory=RemoteWindowsConfig)
@@ -369,6 +393,9 @@ class AppConfig:
             advanced=AdvancedConfig(**dict(data.get("advanced", {}))),
             callback=_callback_config(dict(data.get("callback", {}))),
             m365_entra=M365EntraConfig(**dict(data.get("m365_entra", {}))),
+            network_assessment=NetworkAssessmentConfig(
+                **dict(data.get("network_assessment", {}))
+            ),
             assessment=AssessmentDefaults(**dict(data.get("assessment", {}))),
             orchestration=OrchestrationConfig(**dict(data.get("orchestration", {}))),
             remote_windows=RemoteWindowsConfig(**dict(data.get("remote_windows", {}))),
@@ -417,12 +444,33 @@ class AppConfig:
             raise ValueError(f"Unsupported log level: {self.log_level}")
         if self.email_security.dns_timeout_seconds <= 0:
             raise ValueError("DNS timeout must be greater than zero.")
-        if self.nmap.profile not in {"host-discovery", "top-ports"}:
-            raise ValueError("Nmap profile must be 'host-discovery' or 'top-ports'.")
+        if self.nmap.profile not in {"host-discovery", "top-ports", "discovery", "exposure", "service_inventory", "deep_safe"}:
+            raise ValueError("Nmap profile must be host-discovery, top-ports, discovery, exposure, service_inventory, or deep_safe.")
         if self.nmap.timeout_seconds <= 0:
             raise ValueError("Nmap timeout must be greater than zero.")
         if self.nmap.top_ports < 1 or self.nmap.top_ports > 1000:
             raise ValueError("Nmap top_ports must be between 1 and 1000.")
+        if self.network_assessment.profile not in {"discovery", "exposure", "service_inventory", "deep_safe"}:
+            raise ValueError("network_assessment.profile must be discovery, exposure, service_inventory, or deep_safe.")
+        if self.network_assessment.max_hosts < 1 or self.network_assessment.max_hosts > 65536:
+            raise ValueError("network_assessment.max_hosts must be between 1 and 65536.")
+        if self.network_assessment.max_ports_per_host < 1 or self.network_assessment.max_ports_per_host > 1000:
+            raise ValueError("network_assessment.max_ports_per_host must be between 1 and 1000.")
+        if self.network_assessment.scan_timeout_seconds <= 0:
+            raise ValueError("network_assessment.scan_timeout_seconds must be greater than zero.")
+        if not self.network_assessment.management_ports:
+            raise ValueError("network_assessment.management_ports must not be empty.")
+        if not self.network_assessment.database_ports:
+            raise ValueError("network_assessment.database_ports must not be empty.")
+        for port in [*self.network_assessment.management_ports, *self.network_assessment.database_ports]:
+            if int(port) < 1 or int(port) > 65535:
+                raise ValueError("network_assessment ports must be between 1 and 65535.")
+        if self.network_assessment.include_deep_safe_scripts:
+            blocked_tokens = {"vuln", "exploit", "brute", "auth", "default", "intrusive", "dos"}
+            for script in self.network_assessment.approved_safe_scripts:
+                lowered = script.lower()
+                if any(token in lowered for token in blocked_tokens):
+                    raise ValueError("network_assessment.approved_safe_scripts cannot include intrusive, auth, brute-force, exploit, DoS, or vuln scripts.")
         if self.standard.extended_nmap_top_ports < 1 or self.standard.extended_nmap_top_ports > 1000:
             raise ValueError("standard.extended_nmap_top_ports must be between 1 and 1000.")
         if self.callback.max_retry_attempts < 1:

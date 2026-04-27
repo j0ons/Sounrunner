@@ -98,6 +98,36 @@ nmap:
   service_version_detection: false
   timeout_seconds: 180
   top_ports: 100
+network_assessment:
+  enabled: true
+  profile: "exposure"
+  include_service_version_detection: false
+  include_deep_safe_scripts: false
+  approved_safe_scripts: []
+  max_hosts: 4096
+  max_ports_per_host: 200
+  scan_timeout_seconds: 600
+  classify_network_devices: true
+  infer_segmentation: true
+  require_config_evidence_for_confirmed_segmentation: true
+  management_ports:
+    - 22
+    - 23
+    - 80
+    - 443
+    - 3389
+    - 5985
+    - 5986
+    - 5900
+    - 8080
+    - 8443
+  database_ports:
+    - 1433
+    - 3306
+    - 5432
+    - 6379
+    - 27017
+    - 9200
 standard:
   enabled: true
   backup_process_prompt_enabled: true

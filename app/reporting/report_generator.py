@@ -230,6 +230,103 @@ class ReportGenerator:
                     story.append(Paragraph(f"- {item}", styles["Normal"]))
                 story.append(Spacer(1, 8))
 
+            network_summary = self.session.database.get_metadata("network_assessment_summary", {})
+            if isinstance(network_summary, dict) and network_summary:
+                story.append(Paragraph("Network Security Assessment", styles["Heading2"]))
+                score = network_summary.get("network_score", {})
+                score_value = score.get("network_score", "not scored") if isinstance(score, dict) else "not scored"
+                score_confidence = score.get("confidence", "unknown") if isinstance(score, dict) else "unknown"
+                story.append(
+                    Paragraph(
+                        f"Scan profile: {network_summary.get('scan_profile', 'unknown')} | "
+                        f"Network score: {score_value} | Confidence: {score_confidence}",
+                        styles["Normal"],
+                    )
+                )
+                story.append(
+                    Paragraph(
+                        "The network section separates observed exposure, inferred posture, and imported/confirmed configuration evidence.",
+                        styles["Normal"],
+                    )
+                )
+                category_rows = _count_rows(
+                    network_summary.get("services_by_category", {}),
+                    "Service Category",
+                    "Observed Count",
+                )
+                if category_rows:
+                    story.append(Paragraph("Services By Category", styles["Heading3"]))
+                    category_table = Table(category_rows, repeatRows=1)
+                    category_table.setStyle(_table_style("#164E63"))
+                    story.append(category_table)
+                    story.append(Spacer(1, 8))
+                subnet_rows = _count_rows(
+                    network_summary.get("assessed_subnets", {}),
+                    "Subnet",
+                    "Asset Count",
+                )
+                if subnet_rows:
+                    story.append(Paragraph("Subnets Assessed", styles["Heading3"]))
+                    subnet_table = Table(subnet_rows, repeatRows=1)
+                    subnet_table.setStyle(_table_style("#1E3A8A"))
+                    story.append(subnet_table)
+                    story.append(Spacer(1, 8))
+                mgmt = network_summary.get("management_exposures", [])
+                insecure = network_summary.get("insecure_protocols", [])
+                devices = network_summary.get("network_devices", [])
+                observations = network_summary.get("segmentation_observations", [])
+                story.append(
+                    Paragraph(
+                        f"Management exposures: {len(mgmt) if isinstance(mgmt, list) else 0} | "
+                        f"Insecure protocol observations: {len(insecure) if isinstance(insecure, list) else 0} | "
+                        f"Likely network devices: {len(devices) if isinstance(devices, list) else 0} | "
+                        f"Segmentation observations: {len(observations) if isinstance(observations, list) else 0}",
+                        styles["Normal"],
+                    )
+                )
+                if isinstance(devices, list) and devices:
+                    device_rows = [["Asset", "IP", "Role", "Management Ports"]]
+                    for device in devices[:12]:
+                        if not isinstance(device, dict):
+                            continue
+                        device_rows.append(
+                            [
+                                str(device.get("asset", "")),
+                                str(device.get("ip_address", "")),
+                                str(device.get("role", "")),
+                                ", ".join(str(port) for port in device.get("management_ports", [])),
+                            ]
+                        )
+                    device_table = Table(device_rows, repeatRows=1)
+                    device_table.setStyle(_table_style("#334155"))
+                    story.append(Paragraph("Likely Network Device Inventory", styles["Heading3"]))
+                    story.append(device_table)
+                    story.append(Spacer(1, 8))
+                if isinstance(observations, list) and observations:
+                    story.append(Paragraph("Segmentation Observations", styles["Heading3"]))
+                    for item in observations[:8]:
+                        if not isinstance(item, dict):
+                            continue
+                        story.append(
+                            Paragraph(
+                                f"{item.get('title', '')}: {item.get('summary', '')} "
+                                f"Evidence type: {item.get('evidence_type', '')}.",
+                                styles["Normal"],
+                            )
+                        )
+                if isinstance(score, dict):
+                    drivers = score.get("key_drivers", [])
+                    actions = score.get("top_actions", [])
+                    if isinstance(drivers, list) and drivers:
+                        story.append(Paragraph("Network Score Drivers", styles["Heading3"]))
+                        for item in drivers[:8]:
+                            story.append(Paragraph(f"- {item}", styles["Normal"]))
+                    if isinstance(actions, list) and actions:
+                        story.append(Paragraph("Recommended Network Configuration Improvements", styles["Heading3"]))
+                        for index, item in enumerate(actions[:10], start=1):
+                            story.append(Paragraph(f"{index}. {item}", styles["Normal"]))
+                story.append(Spacer(1, 12))
+
         module_statuses = self.session.database.list_module_statuses()
         if module_statuses:
             story.append(Paragraph("Module Status / Not Assessed", styles["Heading2"]))
@@ -351,6 +448,8 @@ class ReportGenerator:
         story.append(Paragraph(f"Finding correlation: {appendix['correlation_summary']}", styles["Normal"]))
         story.append(Paragraph(f"Remote collection strategy: {appendix['remote_collection_strategy']}", styles["Normal"]))
         story.append(Paragraph(f"Remote collection summary: {appendix['remote_collection_summary']}", styles["Normal"]))
+        story.append(Paragraph(f"Network scan profile: {appendix['network_scan_profile']}", styles["Normal"]))
+        story.append(Paragraph(f"Network assessment summary: {appendix['network_assessment_summary']}", styles["Normal"]))
         if appendix["assessment_warnings"]:
             story.append(
                 Paragraph(
@@ -510,6 +609,7 @@ class ReportGenerator:
                         "launch_context": self.session.database.get_metadata("launch_context", {}),
                         "remote_collection_strategy": self.session.database.get_metadata("remote_collection_strategy", {}),
                         "remote_collection_summary": self.session.database.get_metadata("remote_collection_summary", {}),
+                        "network_assessment_summary": self.session.database.get_metadata("network_assessment_summary", {}),
                         "inventory_assets": self.session.database.get_metadata("inventory_assets", []),
                         "module_statuses": [
                             {
@@ -642,6 +742,7 @@ def _appendix_payload(
     assessment_warnings = session.database.get_metadata("assessment_warnings", [])
     remote_strategy = session.database.get_metadata("remote_collection_strategy", {})
     remote_summary = session.database.get_metadata("remote_collection_summary", {})
+    network_summary = session.database.get_metadata("network_assessment_summary", {})
     manifest_entries = _manifest_entries(session)
     import_sources = sorted(
         {
@@ -672,6 +773,8 @@ def _appendix_payload(
         ),
         "remote_collection_strategy": _remote_strategy_summary(remote_strategy),
         "remote_collection_summary": _remote_summary_text(remote_summary),
+        "network_scan_profile": _network_scan_profile(network_summary),
+        "network_assessment_summary": _network_summary_text(network_summary),
         "activation_plan": activation_plan if isinstance(activation_plan, list) else [],
         "assessment_warnings": assessment_warnings if isinstance(assessment_warnings, list) else [],
         "discovery_sources": assessment_plan.get("discovery_sources", []) if isinstance(assessment_plan, dict) else [],
@@ -774,6 +877,26 @@ def _remote_summary_text(payload: object) -> str:
         f"partial={payload.get('collection_partial', 0)}; "
         f"failed={payload.get('collection_failed', 0)}; "
         f"top_failure={payload.get('top_failure_reason', 'none') or 'none'}"
+    )
+
+
+def _network_scan_profile(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return "not evaluated"
+    return str(payload.get("scan_profile", "unknown"))
+
+
+def _network_summary_text(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return "not evaluated"
+    score = payload.get("network_score", {})
+    score_value = score.get("network_score", "not scored") if isinstance(score, dict) else "not scored"
+    return (
+        f"score={score_value}; "
+        f"services={len(payload.get('services', [])) if isinstance(payload.get('services'), list) else 0}; "
+        f"management_exposures={len(payload.get('management_exposures', [])) if isinstance(payload.get('management_exposures'), list) else 0}; "
+        f"insecure_protocols={len(payload.get('insecure_protocols', [])) if isinstance(payload.get('insecure_protocols'), list) else 0}; "
+        f"network_devices={len(payload.get('network_devices', [])) if isinstance(payload.get('network_devices'), list) else 0}"
     )
 
 

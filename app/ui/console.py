@@ -232,6 +232,14 @@ class ConsoleUi:
         coverage = estate.get("coverage", {}) if isinstance(estate, dict) else {}
         remote = session.database.get_metadata("remote_collection_summary", {})
         remote = remote if isinstance(remote, dict) else {}
+        network = session.database.get_metadata("network_assessment_summary", {})
+        network = network if isinstance(network, dict) else {}
+        network_score = network.get("network_score", {})
+        network_score_value = (
+            network_score.get("network_score", "not scored")
+            if isinstance(network_score, dict)
+            else "not scored"
+        )
         plan = session.database.get_metadata("module_activation_plan", [])
         findings = session.database.list_findings()
         active = sum(1 for item in plan if isinstance(item, dict) and item.get("activation") in {"active", "limited"})
@@ -256,6 +264,12 @@ class ConsoleUi:
             table.add_row("Remote successful", str(remote.get("collection_successful", 0)))
             table.add_row("Remote failed", str(remote.get("collection_failed", 0)))
             table.add_row("Top failure reason", str(remote.get("top_failure_reason", "none") or "none"))
+            table.add_row("Network score", str(network_score_value))
+            table.add_row("Services discovered", str(_list_count(network.get("services"))))
+            table.add_row("Network devices", str(_list_count(network.get("network_devices"))))
+            table.add_row("Management exposures", str(_list_count(network.get("management_exposures"))))
+            table.add_row("Insecure protocols", str(_list_count(network.get("insecure_protocols"))))
+            table.add_row("Segmentation observations", str(_list_count(network.get("segmentation_observations"))))
             table.add_row("Active modules", str(active))
             table.add_row("Skipped/not configured", str(skipped))
             table.add_row(
@@ -278,6 +292,12 @@ class ConsoleUi:
             f"Remote successful: {remote.get('collection_successful', 0)}",
             f"Remote failed: {remote.get('collection_failed', 0)}",
             f"Top failure reason: {remote.get('top_failure_reason', 'none') or 'none'}",
+            f"Network score: {network_score_value}",
+            f"Services discovered: {_list_count(network.get('services'))}",
+            f"Network devices: {_list_count(network.get('network_devices'))}",
+            f"Management exposures: {_list_count(network.get('management_exposures'))}",
+            f"Insecure protocols: {_list_count(network.get('insecure_protocols'))}",
+            f"Segmentation observations: {_list_count(network.get('segmentation_observations'))}",
             f"Active modules: {active}",
             f"Skipped/not configured: {skipped}",
             "Findings: C:{critical} H:{high} M:{medium} L:{low} I:{info}".format(**severity),
@@ -698,3 +718,7 @@ def _auto_scope_lines(context: dict[str, object]) -> list[str]:
             )
         )
     return lines
+
+
+def _list_count(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0

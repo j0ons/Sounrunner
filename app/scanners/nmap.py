@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.config import NmapConfig
+from app.core.config import NetworkAssessmentConfig, NmapConfig
 from app.core.evidence import confidence_for_basis, utc_now
 from app.core.models import Finding
 from app.core.scope import ScopePolicy
@@ -34,6 +34,7 @@ class NmapAdapter:
     session: AssessmentSession
     config: NmapConfig
     package: str = "basic"
+    network_config: NetworkAssessmentConfig | None = None
 
     name: str = "nmap"
 
@@ -58,7 +59,7 @@ class NmapAdapter:
         raw_xml = self.session.evidence_dir / "nmap_scan.xml"
         command = self._build_command(targets, raw_xml)
         logger = logging.getLogger("soun_runner")
-        logger.info("Running Nmap with safe profile: %s", self.config.profile)
+        logger.info("Running Nmap with safe profile: %s command=%s", self._profile(), " ".join(command))
 
         try:
             completed = subprocess.run(
@@ -66,7 +67,7 @@ class NmapAdapter:
                 capture_output=True,
                 check=False,
                 text=True,
-                timeout=self.config.timeout_seconds,
+                timeout=self._timeout_seconds(),
             )
         except FileNotFoundError:
             return ScannerResult(
@@ -78,7 +79,7 @@ class NmapAdapter:
             return ScannerResult(
                 scanner_name=self.name,
                 status="partial",
-                detail=f"Nmap timed out after {self.config.timeout_seconds} seconds.",
+                detail=f"Nmap timed out after {self._timeout_seconds()} seconds.",
             )
 
         command_evidence = self.session.crypto.write_text(
@@ -125,23 +126,48 @@ class NmapAdapter:
         )
 
     def _build_command(self, targets: list[str], output_xml: Path) -> list[str]:
+        profile = self._profile()
+        timeout = self._timeout_seconds()
         command = [
             self.config.path,
             "-oX",
             str(output_xml),
             "--host-timeout",
-            f"{self.config.timeout_seconds}s",
+            f"{timeout}s",
         ]
-        if self.config.profile == "host-discovery":
+        if profile in {"host-discovery", "discovery"}:
             command.extend(["-sn"])
-        elif self.config.profile == "top-ports":
-            command.extend(["-sT", "--top-ports", str(self.config.top_ports), "--open"])
-            if self.config.service_version_detection:
+        elif profile in {"top-ports", "exposure", "service_inventory", "deep_safe"}:
+            command.extend(["-sT", "--top-ports", str(self._max_ports()), "--open"])
+            if self._service_version_detection(profile):
                 command.extend(["-sV", "--version-light"])
+            if profile == "deep_safe" and self.network_config and self.network_config.include_deep_safe_scripts:
+                scripts = _approved_safe_scripts(self.network_config.approved_safe_scripts)
+                if scripts:
+                    command.extend(["--script", ",".join(scripts)])
         else:
-            raise ValueError(f"Unsupported Nmap profile: {self.config.profile}")
+            raise ValueError(f"Unsupported Nmap profile: {profile}")
         command.extend(targets)
         return command
+
+    def _profile(self) -> str:
+        return self.network_config.profile if self.network_config else self.config.profile
+
+    def _timeout_seconds(self) -> int:
+        return self.network_config.scan_timeout_seconds if self.network_config else self.config.timeout_seconds
+
+    def _max_ports(self) -> int:
+        if self.network_config:
+            return min(self.network_config.max_ports_per_host, 1000)
+        return self.config.top_ports
+
+    def _service_version_detection(self, profile: str) -> bool:
+        if self.network_config:
+            return bool(
+                self.network_config.include_service_version_detection
+                or profile == "service_inventory"
+            )
+        return self.config.service_version_detection
 
 
 def parse_nmap_xml(xml_text: str) -> list[NetworkAsset]:
@@ -296,6 +322,10 @@ def _command_evidence(command: list[str], returncode: int, stdout: str, stderr: 
     return json.dumps(
         {
             "command": command,
+            "safe_profile_note": (
+                "Read-only Nmap execution. No stealth, aggressive, exploit, brute-force, "
+                "or intrusive script flags are used by this adapter."
+            ),
             "returncode": returncode,
             "stdout": stdout,
             "stderr": stderr,
@@ -303,3 +333,15 @@ def _command_evidence(command: list[str], returncode: int, stdout: str, stderr: 
         indent=2,
         sort_keys=True,
     )
+
+
+def _approved_safe_scripts(scripts: list[str]) -> list[str]:
+    blocked_tokens = {"vuln", "exploit", "brute", "auth", "default", "intrusive", "dos"}
+    approved: list[str] = []
+    for script in scripts:
+        cleaned = script.strip()
+        lowered = cleaned.lower()
+        if not cleaned or any(token in lowered for token in blocked_tokens):
+            continue
+        approved.append(cleaned)
+    return approved

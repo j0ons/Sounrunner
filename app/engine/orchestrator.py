@@ -64,6 +64,7 @@ class EstateAssessmentModule:
             self.session,
             self.config.nmap,
             package=self.package,
+            network_config=self.config.network_assessment if self.package in {"standard", "advanced"} else None,
         ).scan(self.session.scope)
         if discovery_result.raw_evidence_path:
             evidence_files.append(discovery_result.raw_evidence_path)

@@ -95,6 +95,7 @@ def build_assessment_plan(
     )
     email_enabled = bool(session.intake.domain)
     ad_enabled = bool(config.active_directory.enabled)
+    network_assessment_enabled = bool(config.network_assessment.enabled and estate_mode)
     nmap_available = _nmap_available(config)
     nmap_enabled = bool(config.nmap.enabled and nmap_available and approved_scopes and not session.scope.local_only)
     remote_strategy = plan_remote_collection_strategy(session=session, config=config)
@@ -153,9 +154,18 @@ def build_assessment_plan(
             "nmap_discovery",
             "active" if nmap_enabled else "skipped",
             (
-                f"Approved scope discovery will target {', '.join(approved_scopes)}."
+                f"Approved scope discovery will target {', '.join(approved_scopes)} using profile {config.network_assessment.profile}."
                 if nmap_enabled
                 else "Nmap disabled, unavailable, local-only scope, or no scan targets are available."
+            ),
+        ),
+        _source_entry(
+            "network_assessment",
+            "active" if network_assessment_enabled else "skipped",
+            (
+                "Network assessment will classify services, management exposure, and segmentation observations."
+                if network_assessment_enabled
+                else "Network assessment disabled or package is Basic."
             ),
         ),
         _source_entry(
@@ -284,6 +294,17 @@ def build_assessment_plan(
             ),
             phase="orchestration",
             should_run=estate_mode,
+        ),
+        _module(
+            "network_assessment",
+            "active" if network_assessment_enabled else "skipped",
+            (
+                "Enterprise network assessment will analyze observed exposure, inferred posture, and imported configuration evidence."
+                if network_assessment_enabled
+                else "Network assessment disabled or package is Basic."
+            ),
+            phase="analysis",
+            should_run=network_assessment_enabled,
         ),
         _module(
             "backup_readiness",

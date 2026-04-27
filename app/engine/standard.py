@@ -27,6 +27,7 @@ from app.modules.identity import IdentityModule
 from app.modules.incident_readiness import IncidentReadinessModule
 from app.modules.m365_entra import M365EntraModule
 from app.modules.network_lite import NetworkExposureLiteModule
+from app.modules.network_assessment import NetworkAssessmentModule
 from app.modules.privileged_access import PrivilegedAccessModule
 from app.modules.ransomware_readiness import RansomwareReadinessModule
 from app.modules.firewall_vpn_import import FirewallVpnImportModule
@@ -85,6 +86,7 @@ class StandardPackageRunner:
             "backup_platform_import": BackupPlatformImportModule(self.session, self.config),
             "active_directory": ActiveDirectoryModule(self.session, self.config),
             "estate_orchestration": EstateAssessmentModule(self.session, self.config, package="standard"),
+            "network_assessment": NetworkAssessmentModule(self.session, self.config),
             "backup_readiness": BackupReadinessModule(self.session, context.windows_evidence),
             "privileged_access": PrivilegedAccessModule(self.session, context.windows_evidence),
             "incident_readiness": IncidentReadinessModule(self.session, context.windows_evidence),

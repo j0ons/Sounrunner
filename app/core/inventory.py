@@ -540,6 +540,8 @@ def _guess_asset_role(
         return {"role": "server", "source": "naming_subnet_heuristic"}
     if any(token in hint for token in ["switch", "router", "firewall", "ap", "printer", "vpn"]):
         return {"role": "network_device", "source": "naming_subnet_heuristic"}
+    if "windows" in hint and any(token in hint for token in ["workstation", "desktop", "laptop", "win10", "win11", "user", "pc-"]):
+        return {"role": "workstation", "source": "naming_subnet_heuristic"}
     if any(port in discovery_ports for port in [22, 443, 5985, 5986, 3389, 445]) and metadata_source in {"nmap", "nessus", "greenbone"}:
         return {"role": "server", "source": "imported_scanner_metadata"}
     if "windows" in hint:
