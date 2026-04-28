@@ -22,6 +22,7 @@ from app.engine.remote_strategy import (
     effective_remote_windows_config,
     plan_remote_collection_strategy,
 )
+from app.engine.host_fingerprint import HostFingerprint, fingerprint_host
 from app.modules.endpoint import build_endpoint_findings
 from app.modules.identity import build_identity_findings
 from app.modules.network_lite import build_local_exposure_findings
@@ -117,7 +118,7 @@ class EstateAssessmentModule:
         self.session.database.set_metadata("remote_collection_strategy", strategy.to_metadata())
         details.append(f"Remote collection strategy={strategy.mode}; {strategy.reason}")
 
-        planned_targets, eligible_records, planning_notes = self._plan_remote_targets(inventory, strategy)
+        planned_targets, eligible_records, planning_notes, fingerprint_summary = self._plan_remote_targets(inventory, strategy)
         details.extend(planning_notes)
         remote_outcomes: list[HostCollectionOutcome] = []
         if strategy.enabled and planned_targets:
@@ -164,12 +165,22 @@ class EstateAssessmentModule:
                 "eligible_remote_assets": len(eligible_records),
                 "planned_remote_targets": len(planned_targets),
                 "remote_collection_strategy": strategy.to_metadata(),
-                "remote_collection_summary": _remote_collection_summary(remote_outcomes, strategy, len(eligible_records), len(planned_targets)),
+                "remote_collection_summary": _remote_collection_summary(
+                    remote_outcomes,
+                    strategy,
+                    fingerprint_summary,
+                    len(planned_targets),
+                ),
             },
         )
         self.session.database.set_metadata(
             "remote_collection_summary",
-            _remote_collection_summary(remote_outcomes, strategy, len(eligible_records), len(planned_targets)),
+            _remote_collection_summary(
+                remote_outcomes,
+                strategy,
+                fingerprint_summary,
+                len(planned_targets),
+            ),
         )
         status = _estate_status(discovery_result.status, remote_outcomes, inventory.list_assets())
         logger.info(
@@ -247,7 +258,7 @@ class EstateAssessmentModule:
         self,
         inventory: AssetInventory,
         strategy: RemoteCollectionStrategy,
-    ) -> tuple[list[tuple[str, AssetRecord]], list[AssetRecord], list[str]]:
+    ) -> tuple[list[tuple[str, AssetRecord]], list[AssetRecord], list[str], dict[str, object]]:
         records = inventory.list_assets()
         planned: list[tuple[str, AssetRecord]] = []
         eligible_records: list[AssetRecord] = []
@@ -255,8 +266,27 @@ class EstateAssessmentModule:
         seen_targets: set[str] = set()
         skipped = 0
         reason_counts: dict[str, int] = {}
+        fingerprint_counts = {
+            "confirmed_windows": 0,
+            "probable_windows": 0,
+            "probable_linux_unix": 0,
+            "probable_network_device": 0,
+            "probable_storage": 0,
+            "unknown": 0,
+        }
+        remote_eligible = 0
+        not_eligible_no_winrm = 0
+        fingerprints: list[dict[str, object]] = []
         for record in records:
-            eligibility = self._remote_collection_eligibility(record, strategy)
+            services = self.session.database.list_asset_services(record.asset_id)
+            fingerprint = fingerprint_host(record, services)
+            fingerprint_counts[fingerprint.classification] = fingerprint_counts.get(fingerprint.classification, 0) + 1
+            fingerprints.append(fingerprint.to_dict(record))
+            record = _apply_fingerprint(record, fingerprint)
+            inventory.upsert(record)
+            if fingerprint.is_windows_like and strategy.require_winrm_port_observed and not fingerprint.has_winrm:
+                not_eligible_no_winrm += 1
+            eligibility = self._remote_collection_eligibility(record, strategy, fingerprint)
             inventory.update_remoting_eligibility(
                 record.asset_id,
                 eligible=eligibility["eligible"],
@@ -277,6 +307,7 @@ class EstateAssessmentModule:
                     str(eligibility["reason"]),
                 )
                 continue
+            remote_eligible += 1
             eligible_records.append(inventory.find_asset(record.asset_id) or record)
             target = self._resolve_remote_target(record, inventory)
             if not target:
@@ -315,12 +346,31 @@ class EstateAssessmentModule:
             notes.append(
                 f"{skipped} asset(s) remained discovery-only or imported-only because no approved in-scope WinRM target could be resolved."
             )
-        return planned, eligible_records, notes
+        fingerprint_summary = {
+            **fingerprint_counts,
+            "windows_candidates": fingerprint_counts.get("confirmed_windows", 0)
+            + fingerprint_counts.get("probable_windows", 0),
+            "unknown_os": fingerprint_counts.get("unknown", 0),
+            "remote_eligible": remote_eligible,
+            "not_eligible_no_winrm": not_eligible_no_winrm,
+            "host_fingerprints": fingerprints,
+        }
+        self.session.database.set_metadata("host_fingerprints", fingerprints)
+        notes.append(
+            "Host fingerprinting: "
+            f"confirmed_windows={fingerprint_counts.get('confirmed_windows', 0)}, "
+            f"probable_windows={fingerprint_counts.get('probable_windows', 0)}, "
+            f"unknown={fingerprint_counts.get('unknown', 0)}, "
+            f"remote_eligible={remote_eligible}, "
+            f"not_eligible_no_winrm={not_eligible_no_winrm}."
+        )
+        return planned, eligible_records, notes, fingerprint_summary
 
     def _remote_collection_eligibility(
         self,
         record: AssetRecord,
         strategy: RemoteCollectionStrategy,
+        fingerprint: HostFingerprint,
     ) -> dict[str, str | bool]:
         if not strategy.enabled:
             return {
@@ -342,29 +392,28 @@ class EstateAssessmentModule:
                 "eligible": False,
                 "reason": "skipped_discovery_only: asset already has complete direct collection evidence.",
             }
-        os_blob = f"{record.os_family} {record.os_guess}".lower()
-        if os_blob and "windows" not in os_blob and record.asset_role not in {
-            "server",
-            "workstation",
-            "domain_controller",
-            "unknown",
-        }:
+        if fingerprint.classification in {"probable_network_device", "probable_linux_unix", "probable_storage"}:
             return {
                 "eligible": False,
-                "reason": "not_windows_candidate: available evidence does not indicate a Windows-compatible remote collection target.",
+                "reason": f"not_windows_candidate: host fingerprint is {fingerprint.classification}.",
             }
-        services = self.session.database.list_asset_services(record.asset_id)
-        ports = {int(item.get("port", 0)) for item in services if str(item.get("state", "")).lower() in {"open", "open|filtered", ""}}
-        if ports and not _windows_candidate_ports(ports) and record.asset_role == "unknown":
+        if fingerprint.classification == "unknown":
             return {
                 "eligible": False,
-                "reason": "not_windows_candidate: discovered services do not look Windows-compatible.",
+                "reason": "not_windows_candidate: host fingerprint is unknown.",
             }
-        has_winrm = bool({5985, 5986} & ports)
-        if strategy.require_winrm_port_observed and not has_winrm:
+        if not fingerprint.is_windows_like:
             return {
                 "eligible": False,
-                "reason": "no_winrm_service_detected: WinRM port 5985/5986 was not observed in approved discovery evidence.",
+                "reason": "not_windows_candidate: available evidence does not indicate a Windows-compatible target.",
+            }
+        if strategy.require_winrm_port_observed and not fingerprint.has_winrm:
+            return {
+                "eligible": False,
+                "reason": (
+                    "no_winrm_service_detected: Windows-like host fingerprint observed, "
+                    "but WinRM port 5985/5986 was not observed in approved discovery evidence."
+                ),
             }
         return {
             "eligible": True,
@@ -631,7 +680,7 @@ def _normalize_remote_status(result: RemoteWindowsCollectionResult) -> dict[str,
 def _remote_collection_summary(
     outcomes: list[HostCollectionOutcome],
     strategy: RemoteCollectionStrategy,
-    candidate_count: int,
+    fingerprint_summary: dict[str, object],
     planned_count: int,
 ) -> dict[str, object]:
     failure_counts: dict[str, int] = {}
@@ -644,7 +693,15 @@ def _remote_collection_summary(
     return {
         "strategy": strategy.mode,
         "strategy_reason": strategy.reason,
-        "windows_candidates": candidate_count,
+        "windows_candidates": int(fingerprint_summary.get("windows_candidates", 0) or 0),
+        "confirmed_windows": int(fingerprint_summary.get("confirmed_windows", 0) or 0),
+        "probable_windows": int(fingerprint_summary.get("probable_windows", 0) or 0),
+        "probable_linux_unix": int(fingerprint_summary.get("probable_linux_unix", 0) or 0),
+        "probable_network_device": int(fingerprint_summary.get("probable_network_device", 0) or 0),
+        "probable_storage": int(fingerprint_summary.get("probable_storage", 0) or 0),
+        "unknown_os": int(fingerprint_summary.get("unknown_os", 0) or fingerprint_summary.get("unknown", 0) or 0),
+        "remote_eligible": int(fingerprint_summary.get("remote_eligible", 0) or 0),
+        "not_eligible_no_winrm": int(fingerprint_summary.get("not_eligible_no_winrm", 0) or 0),
         "collection_attempted": planned_count,
         "collection_successful": sum(1 for item in outcomes if item.status == "complete"),
         "collection_partial": sum(1 for item in outcomes if item.status == "partial"),
@@ -654,8 +711,14 @@ def _remote_collection_summary(
     }
 
 
-def _windows_candidate_ports(ports: set[int]) -> bool:
-    return bool(ports & {135, 139, 445, 3389, 5985, 5986})
+def _apply_fingerprint(record: AssetRecord, fingerprint: HostFingerprint) -> AssetRecord:
+    if not record.os_guess or record.os_guess == "unknown":
+        record.os_guess = fingerprint.classification
+    if fingerprint.classification == "probable_network_device" and record.asset_role == "unknown":
+        record.asset_role = "network_device"
+        record.asset_type = "network_device"
+        record.role_source = "service_fingerprint"
+    return record
 
 
 def _reason_code(reason: str) -> str:

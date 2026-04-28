@@ -297,6 +297,11 @@ class ConsoleUi:
             table.add_row("Imported-only", str(coverage.get("imported_evidence_only", 0)))
             table.add_row("Remote strategy", str(remote.get("strategy", "not evaluated")))
             table.add_row("Windows candidates", str(remote.get("windows_candidates", 0)))
+            table.add_row("Confirmed Windows", str(remote.get("confirmed_windows", 0)))
+            table.add_row("Probable Windows", str(remote.get("probable_windows", 0)))
+            table.add_row("Unknown OS", str(remote.get("unknown_os", 0)))
+            table.add_row("Remote eligible", str(remote.get("remote_eligible", 0)))
+            table.add_row("Not eligible no WinRM", str(remote.get("not_eligible_no_winrm", 0)))
             table.add_row("Remote attempted", str(remote.get("collection_attempted", 0)))
             table.add_row("Remote successful", str(remote.get("collection_successful", 0)))
             table.add_row("Remote failed", str(remote.get("collection_failed", 0)))
@@ -325,6 +330,11 @@ class ConsoleUi:
             f"Imported-only: {coverage.get('imported_evidence_only', 0)}",
             f"Remote strategy: {remote.get('strategy', 'not evaluated')}",
             f"Windows candidates: {remote.get('windows_candidates', 0)}",
+            f"Confirmed Windows: {remote.get('confirmed_windows', 0)}",
+            f"Probable Windows: {remote.get('probable_windows', 0)}",
+            f"Unknown OS: {remote.get('unknown_os', 0)}",
+            f"Remote eligible: {remote.get('remote_eligible', 0)}",
+            f"Not eligible no WinRM: {remote.get('not_eligible_no_winrm', 0)}",
             f"Remote attempted: {remote.get('collection_attempted', 0)}",
             f"Remote successful: {remote.get('collection_successful', 0)}",
             f"Remote failed: {remote.get('collection_failed', 0)}",

@@ -112,6 +112,11 @@ class ReportGenerator:
                         "Remote collection strategy: "
                         f"{remote_summary.get('strategy', 'not evaluated')} | "
                         f"Windows candidates: {remote_summary.get('windows_candidates', 0)} | "
+                        f"Confirmed Windows: {remote_summary.get('confirmed_windows', 0)} | "
+                        f"Probable Windows: {remote_summary.get('probable_windows', 0)} | "
+                        f"Unknown OS: {remote_summary.get('unknown_os', 0)} | "
+                        f"Remote eligible: {remote_summary.get('remote_eligible', 0)} | "
+                        f"Not eligible no WinRM: {remote_summary.get('not_eligible_no_winrm', 0)} | "
                         f"Attempted: {remote_summary.get('collection_attempted', 0)} | "
                         f"Successful: {remote_summary.get('collection_successful', 0)} | "
                         f"Failed: {remote_summary.get('collection_failed', 0)} | "
@@ -119,6 +124,10 @@ class ReportGenerator:
                         styles["Normal"],
                     )
                 )
+                story.append(Paragraph("Assessment Coverage Depth", styles["Heading3"]))
+                for paragraph in _assessment_coverage_depth_text(remote_summary):
+                    story.append(Paragraph(paragraph, styles["Normal"]))
+                story.append(Spacer(1, 8))
             site_rows = _coverage_rows(estate.get("by_site", {}), "Site")
             if site_rows:
                 story.append(Paragraph("Coverage By Site", styles["Heading3"]))
@@ -773,6 +782,7 @@ def _appendix_payload(
         ),
         "remote_collection_strategy": _remote_strategy_summary(remote_strategy),
         "remote_collection_summary": _remote_summary_text(remote_summary),
+        "assessment_coverage_depth": " ".join(_assessment_coverage_depth_text(remote_summary)),
         "network_scan_profile": _network_scan_profile(network_summary),
         "network_assessment_summary": _network_summary_text(network_summary),
         "activation_plan": activation_plan if isinstance(activation_plan, list) else [],
@@ -872,12 +882,39 @@ def _remote_summary_text(payload: object) -> str:
         return "not evaluated"
     return (
         f"windows_candidates={payload.get('windows_candidates', 0)}; "
+        f"confirmed_windows={payload.get('confirmed_windows', 0)}; "
+        f"probable_windows={payload.get('probable_windows', 0)}; "
+        f"unknown_os={payload.get('unknown_os', 0)}; "
+        f"remote_eligible={payload.get('remote_eligible', 0)}; "
+        f"not_eligible_no_winrm={payload.get('not_eligible_no_winrm', 0)}; "
         f"attempted={payload.get('collection_attempted', 0)}; "
         f"successful={payload.get('collection_successful', 0)}; "
         f"partial={payload.get('collection_partial', 0)}; "
         f"failed={payload.get('collection_failed', 0)}; "
         f"top_failure={payload.get('top_failure_reason', 'none') or 'none'}"
     )
+
+
+def _assessment_coverage_depth_text(remote_summary: object) -> list[str]:
+    if not isinstance(remote_summary, dict):
+        remote_summary = {}
+    return [
+        (
+            "Discovery confirms observed network exposure only. It does not prove endpoint posture, "
+            "patch state, Defender status, local administrators, or backup agent state."
+        ),
+        (
+            "Endpoint posture requires WinRM/domain authentication, an approved configured credential path, "
+            "or imported endpoint evidence. The runner does not enable WinRM, change firewall policy, "
+            "or use alternate administrative channels."
+        ),
+        (
+            "SMB/RDP/RPC/NetBIOS assets without observed WinRM are treated as Windows-like but not remotely "
+            f"collectible under current safety rules. Probable Windows: {remote_summary.get('probable_windows', 0)}; "
+            f"confirmed Windows: {remote_summary.get('confirmed_windows', 0)}; "
+            f"not eligible due to missing WinRM: {remote_summary.get('not_eligible_no_winrm', 0)}."
+        ),
+    ]
 
 
 def _network_scan_profile(payload: object) -> str:

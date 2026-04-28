@@ -46,6 +46,11 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
         "remote_collection_summary",
         {
             "windows_candidates": 12,
+            "confirmed_windows": 2,
+            "probable_windows": 10,
+            "unknown_os": 3,
+            "remote_eligible": 8,
+            "not_eligible_no_winrm": 4,
             "collection_attempted": 8,
             "collection_successful": 5,
             "collection_partial": 1,
@@ -78,6 +83,9 @@ def test_report_appendix_includes_manifest_and_callback_status(tmp_path: Path) -
     assert appendix["discovery_sources"]
     assert "current_user_integrated_auth" in appendix["remote_collection_strategy"]
     assert "attempted=8" in appendix["remote_collection_summary"]
+    assert "probable_windows=10" in appendix["remote_collection_summary"]
+    assert "Discovery confirms observed network exposure" in appendix["assessment_coverage_depth"]
+    assert "not eligible due to missing WinRM: 4" in appendix["assessment_coverage_depth"]
 
 
 def _finding() -> Finding:

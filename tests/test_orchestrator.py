@@ -87,6 +87,9 @@ def test_estate_orchestrator_uses_imported_assets_for_remote_collection(tmp_path
         ip_address="10.0.0.25",
         source="scanner_import",
     )
+    imported.os_family = "Windows"
+    imported.os_guess = "Microsoft Windows Server"
+    inventory.upsert(imported)
 
     def fake_collect(self, *, target: str, asset_id: str):  # noqa: ANN001
         evidence = WindowsEvidence(supported=True, collected_at="2026-01-01T00:00:00+00:00")
@@ -232,8 +235,64 @@ def test_estate_orchestrator_skips_candidates_without_observed_winrm_by_default(
     summary = session.database.get_metadata("remote_collection_summary", {})
 
     assert result.status == "partial"
+    assert summary["probable_windows"] == 1
+    assert summary["windows_candidates"] == 1
+    assert summary["remote_eligible"] == 0
+    assert summary["not_eligible_no_winrm"] == 1
     assert summary["collection_attempted"] == 0
     assert any("no_winrm_service_detected" in item["detail"] for item in statuses)
+
+
+def test_estate_orchestrator_fingerprints_winrm_host_as_remote_eligible(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = AppConfig(workspace_root=tmp_path / "data", log_root=tmp_path / "logs")
+    config.active_directory.domain = "corp.example.local"
+    session = SessionManager(config).create_session(_intake())
+    session.database.set_metadata("auto_context", {"domain_joined": True, "domain_name": "corp.example.local"})
+    raw_xml = session.crypto.write_text(session.evidence_dir / "nmap_scan.xml", "<nmaprun />")
+
+    def fake_scan(self, scope):  # noqa: ANN001
+        return ScannerResult(
+            scanner_name="nmap",
+            status="complete",
+            detail="ok",
+            assets=[
+                NetworkAsset(
+                    address="10.0.0.40",
+                    hostnames=["winrm-host"],
+                    services=[NetworkService(protocol="tcp", port=5985, state="open", service_name="wsman")],
+                )
+            ],
+            raw_evidence_path=raw_xml,
+        )
+
+    def fake_collect(self, *, target: str, asset_id: str):  # noqa: ANN001
+        evidence = WindowsEvidence(supported=True, collected_at="2026-01-01T00:00:00+00:00")
+        evidence.raw_evidence_path = session.crypto.write_text(
+            session.evidence_dir / "hosts" / asset_id / "windows_remote_evidence.json",
+            "{}",
+        )
+        return RemoteWindowsCollectionResult(
+            target=target,
+            status="complete",
+            detail="ok",
+            evidence=evidence,
+            evidence_path=evidence.raw_evidence_path,
+        )
+
+    monkeypatch.setattr("app.engine.remote_strategy.is_windows", lambda: True)
+    monkeypatch.setattr("app.engine.remote_strategy.powershell_available", lambda: True)
+    monkeypatch.setattr("app.engine.orchestrator.NmapAdapter.scan", fake_scan)
+    monkeypatch.setattr("app.engine.orchestrator.RemoteWindowsCollector.collect", fake_collect)
+
+    EstateAssessmentModule(session=session, config=config, package="standard").run()
+    summary = session.database.get_metadata("remote_collection_summary", {})
+
+    assert summary["probable_windows"] == 1
+    assert summary["remote_eligible"] == 1
+    assert summary["collection_attempted"] == 1
 
 
 def _intake() -> AssessmentIntake:

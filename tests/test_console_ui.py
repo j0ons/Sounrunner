@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.core.config import AppConfig
 from app.core.input_normalization import normalize_prompt_value
 from app.core.session import AssessmentIntake
+from app.core.session import SessionManager
 from app.ui.console import ConsoleUi
 from main import _apply_config_defaults
 
@@ -153,3 +154,59 @@ def test_apply_config_defaults_handles_none_scope() -> None:
 
     assert updated.authorized_scope == "local-host-only"
     assert updated.business_unit == ""
+
+
+def test_estate_dashboard_prints_fingerprint_counters(tmp_path, capsys) -> None:
+    config = AppConfig(workspace_root=tmp_path / "data", log_root=tmp_path / "logs")
+    session = SessionManager(config).create_session(_intake())
+    session.database.set_metadata(
+        "estate_summary",
+        {
+            "coverage": {
+                "total_assets": 3,
+                "assessed": 1,
+                "partial": 0,
+                "unreachable": 0,
+                "discovery_only": 2,
+                "imported_evidence_only": 0,
+            }
+        },
+    )
+    session.database.set_metadata(
+        "remote_collection_summary",
+        {
+            "strategy": "current_user_integrated_auth",
+            "windows_candidates": 2,
+            "confirmed_windows": 0,
+            "probable_windows": 2,
+            "unknown_os": 1,
+            "remote_eligible": 1,
+            "not_eligible_no_winrm": 1,
+            "collection_attempted": 1,
+            "collection_successful": 1,
+            "collection_failed": 0,
+        },
+    )
+    ui = ConsoleUi(app_version="test")
+    ui.console = None
+
+    ui.print_estate_dashboard(session)
+    output = capsys.readouterr().out
+
+    assert "Probable Windows: 2" in output
+    assert "Confirmed Windows: 0" in output
+    assert "Unknown OS: 1" in output
+    assert "Remote eligible: 1" in output
+    assert "Not eligible no WinRM: 1" in output
+
+
+def _intake() -> AssessmentIntake:
+    return AssessmentIntake(
+        client_name="Client",
+        site="HQ",
+        operator_name="Operator",
+        package="standard",
+        authorized_scope="local-host-only",
+        scope_notes="test",
+        consent_confirmed=True,
+    )
