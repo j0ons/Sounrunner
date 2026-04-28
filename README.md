@@ -212,10 +212,28 @@ Basic can still be launched interactively as a local validation mode. Standard a
 
 Interactive prompt contract:
 
-- company name
-- package: `basic`, `standard`, or `advanced`
+- company/entity name
+- package selection: `basic`, `standard`, or `advanced`
 
 Everything else is config-derived, environment-derived, connector-derived, or marked skipped/not configured. The runner no longer asks for subnet, site, operator, AD domain, business unit, email domain, connector availability, allowlist, or denylist during normal interactive launch.
+
+Interactive package menu:
+
+```text
+[1] Basic
+    Local endpoint validation and light network exposure review.
+    Best for quick workstation/server baseline.
+
+[2] Standard
+    Company-level network discovery, exposure assessment, endpoint posture where available, and prioritized remediation roadmap.
+    Best for normal client assessment.
+
+[3] Advanced
+    Standard assessment plus business continuity, ransomware readiness, policy/SOP gaps, recovery priorities, and 30/60/90-day plan.
+    Best for management-level full assessment.
+```
+
+Default interactive selection is `Standard`. Accepted values are `1`, `basic`, `2`, `standard`, `3`, or `advanced`.
 
 Supported launch overrides:
 
@@ -235,11 +253,24 @@ Behavior:
 
 - If config already contains approved scopes, they are used as the assessment boundary.
 - If `--approved-scope` is supplied, it overrides config and auto-detection for that run and records `scope_source=cli_scope`.
+- If Standard/Advanced must ask for an approved CIDR because auto-scope failed, that operator-provided launch scope is also recorded as `scope_source=cli_scope`.
+- If `--package` is supplied, it is used directly and the package menu is skipped.
+- If `assessment.package` is supplied in config, it is used for `--non-interactive` or explicit config-driven launches. Normal interactive launches still show the package menu unless `--package` is provided.
 - If config scopes are absent, Standard/Advanced use auto-detected directly connected private subnets as the default company scope.
-- If only loopback or non-private interfaces are detected, Basic can use `local-host-only`. Standard/Advanced block localhost fallback by default unless `assessment.allow_localhost_fallback_for_company_modes: true` is explicitly configured.
+- If only loopback or non-private interfaces are detected, Basic can use `local-host-only`. Standard/Advanced ask for an approved company CIDR interactively, or block localhost fallback in headless mode unless `assessment.allow_localhost_fallback_for_company_modes: true` is explicitly configured.
 - Interactive prompting is reserved for company name and package.
 - Optional fields do not force extra prompts during company-wide runs.
 - If Standard or Advanced is explicitly allowed to run with `local-host-only`, the report warns that estate coverage is limited.
+
+Startup order:
+
+1. Banner.
+2. Company/entity name when missing from CLI or config.
+3. Package selection when missing from CLI.
+4. Scope detection or approved scope resolution.
+5. Run contract summary.
+6. Confirmation only when required by policy/config.
+7. Assessment execution.
 
 One-command Standard launch:
 

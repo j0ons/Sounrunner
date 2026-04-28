@@ -229,21 +229,29 @@ def main() -> int:
             ui.success(f"Manual callback resend completed with status: {status}")
             return 0
 
-        ui.print_phase("Launch", "Detecting local enterprise context and auto-scope.")
         auto_context = detect_enterprise_context(config)
         if cli_scope:
             _mark_cli_scope(auto_context, cli_scope)
         apply_auto_context_to_config(config, auto_context)
         intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=auto_context)
+        ui.print_phase("Scope", f"Resolved scope from {auto_context.scope_source}.")
         report_mode = _resolve_report_mode(args.report_mode, config, intake.package)
         launch_warnings = _launch_warnings(intake, config, auto_context)
         launch_warnings.extend(auto_context.warnings)
+        launch_context = auto_context.to_dict()
+        launch_context.update(
+            {
+                "assessment_mode": _assessment_mode_label(intake.package),
+                "remote_strategy": _launch_remote_strategy(config, auto_context),
+                "network_assessment": _network_assessment_label(config, intake.package),
+            }
+        )
         ui.print_launch_summary(
             intake,
             non_interactive=bool(args.non_interactive),
             report_mode=report_mode,
             warnings=launch_warnings,
-            context=auto_context.to_dict(),
+            context=launch_context,
         )
         session = SessionManager(config).create_session(intake)
         store_preflight_report(session, preflight.to_dict())
@@ -303,8 +311,6 @@ def _apply_config_defaults(intake: AssessmentIntake, config: AppConfig) -> Asses
         intake.site = config.assessment.site
     if not intake.operator_name and config.assessment.operator_name:
         intake.operator_name = config.assessment.operator_name
-    if not intake.package and config.assessment.package:
-        intake.package = config.assessment.package
     if not intake.scope_notes and config.assessment.scope_notes:
         intake.scope_notes = config.assessment.scope_notes
     if not intake.consent_confirmed and config.assessment.consent_confirmed:
@@ -353,15 +359,11 @@ def _resolve_intake(
                 + ". Supply valid values via CLI or config."
             )
         return intake
+
+    if _needs_interactive_identity_prompt(intake, args):
+        intake = ui.complete_intake(intake, prompt_optional=False)
+    intake = _prompt_for_scope_if_company_mode_needs_it(intake, args, config, ui, context)
     errors = _launch_validation_errors(intake, config)
-    if errors and _prompt_can_fix(errors):
-        resolved = ui.complete_intake(intake, prompt_optional=False)
-        resolved_errors = _launch_validation_errors(resolved, config)
-        if resolved_errors:
-            raise ValueError(
-                "Launch validation failed after intake: " + "; ".join(resolved_errors) + ". Fix CLI or config values."
-            )
-        return resolved
     if errors:
         raise ValueError("Launch validation failed: " + "; ".join(errors) + ". Fix CLI or config values.")
     return intake
@@ -372,7 +374,7 @@ def _build_seed_intake(
     config: AppConfig,
     context: AutoEnterpriseContext,
 ) -> AssessmentIntake:
-    package = normalize_prompt_value(args.package or config.assessment.package).lower()
+    package = _package_from_launch_sources(args, config)
     cli_scope = normalize_prompt_value(getattr(args, "approved_scope", ""))
     configured_scope = _scope_value_from_config(config)
     scope = cli_scope or configured_scope or context.default_scope
@@ -407,6 +409,60 @@ def _scope_value_from_config(config: AppConfig) -> str:
     if config.assessment.approved_scopes:
         return ",".join(config.assessment.approved_scopes)
     return normalize_prompt_value(config.assessment.approved_scope)
+
+
+def _package_from_launch_sources(args: argparse.Namespace, config: AppConfig) -> str:
+    cli_package = normalize_prompt_value(args.package).lower()
+    if cli_package:
+        return cli_package
+    if _use_config_package(args):
+        return normalize_prompt_value(config.assessment.package).lower()
+    return ""
+
+
+def _use_config_package(args: argparse.Namespace) -> bool:
+    return bool(args.non_interactive or args.scope_from_config)
+
+
+def _prompt_for_scope_if_company_mode_needs_it(
+    intake: AssessmentIntake,
+    args: argparse.Namespace,
+    config: AppConfig,
+    ui: ConsoleUi,
+    context: AutoEnterpriseContext,
+) -> AssessmentIntake:
+    if not _needs_interactive_company_scope(intake, args, config):
+        return intake
+    intake.authorized_scope = ui.ask_approved_scope(intake.package)
+    context.scope_source = "cli_scope"
+    context.default_scope = intake.authorized_scope
+    try:
+        parsed = ScopePolicy.parse(intake.authorized_scope)
+        context.private_subnets = [str(network) for network in parsed.networks]
+    except ValueError:
+        context.private_subnets = [intake.authorized_scope]
+    return intake
+
+
+def _needs_interactive_company_scope(
+    intake: AssessmentIntake,
+    args: argparse.Namespace,
+    config: AppConfig,
+) -> bool:
+    if normalize_prompt_value(getattr(args, "approved_scope", "")):
+        return False
+    if _scope_value_from_config(config):
+        return False
+    if config.assessment.allow_localhost_fallback_for_company_modes:
+        return False
+    package = normalize_prompt_value(intake.package).lower()
+    scope = normalize_prompt_value(intake.authorized_scope).lower()
+    return package in {"standard", "advanced"} and scope in {
+        "local",
+        "localhost",
+        "local-host-only",
+        "host-only",
+    }
 
 
 def _missing_required_values(intake: AssessmentIntake) -> list[str]:
@@ -486,11 +542,14 @@ def _localhost_fallback_guard_error(intake: AssessmentIntake, config: AppConfig)
     )
 
 
-def _prompt_can_fix(errors: list[str]) -> bool:
-    """Only company/package errors are recoverable by the minimal interactive intake."""
-
-    recoverable = {"missing client_name", "missing package", "invalid package"}
-    return all(item in recoverable for item in errors)
+def _needs_interactive_identity_prompt(intake: AssessmentIntake, args: argparse.Namespace) -> bool:
+    if not normalize_prompt_value(intake.client_name):
+        return True
+    package = normalize_prompt_value(intake.package).lower()
+    cli_package = normalize_prompt_value(args.package)
+    if cli_package:
+        return False
+    return package not in {"basic", "standard", "advanced"}
 
 
 def _host_list_validation_error(label: str, values: list[str]) -> str | None:
@@ -577,6 +636,33 @@ def _launch_warnings(
             "No enterprise connectors or imports are configured. Standard/Advanced will rely primarily on in-scope network discovery."
         )
     return warnings
+
+
+def _assessment_mode_label(package: str) -> str:
+    if package == "basic":
+        return "Basic local"
+    if package == "advanced":
+        return "Advanced company-level"
+    return "Standard company-level"
+
+
+def _network_assessment_label(config: AppConfig, package: str) -> str:
+    if package not in {"standard", "advanced"}:
+        return "disabled"
+    return "enabled" if config.network_assessment.enabled else "disabled"
+
+
+def _launch_remote_strategy(config: AppConfig, context: AutoEnterpriseContext) -> str:
+    if config.remote_windows.enabled and config.remote_windows.username:
+        return "configured_credentials"
+    if (
+        config.remote_windows.auto_current_user
+        and config.remote_windows.attempt_current_user_when_domain_joined
+        and context.os_name.lower() == "windows"
+        and (context.domain_joined or context.ad_domain)
+    ):
+        return "current_user_integrated_auth"
+    return "unavailable"
 
 
 if __name__ == "__main__":

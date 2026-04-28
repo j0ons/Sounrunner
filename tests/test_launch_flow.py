@@ -57,7 +57,7 @@ assessment:
     assert intake.consent_confirmed is True
 
 
-def test_interactive_launch_uses_config_without_prompt_when_ready(tmp_path: Path) -> None:
+def test_interactive_launch_ignores_config_package_and_prompts(tmp_path: Path) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
         """
@@ -75,12 +75,24 @@ assessment:
     )
     config = AppConfig.load(config_file)
     args = build_parser().parse_args(["--config", str(config_file)])
-    ui = DummyUi()
+    resolved = AssessmentIntake(
+        client_name="Contoso",
+        site="HQ",
+        operator_name="Analyst",
+        package="standard",
+        authorized_scope="10.0.0.0/24",
+        scope_notes="No additional notes.",
+        consent_confirmed=True,
+    )
+    ui = DummyUi(result=resolved)
 
     intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=_auto_context())  # type: ignore[arg-type]
 
-    assert ui.called is False
+    assert ui.called is True
+    assert ui.seed is not None
+    assert ui.seed.package == ""
     assert intake.operator_name == "Analyst"
+    assert intake.package == "standard"
     assert intake.authorized_scope == "10.0.0.0/24"
 
 
@@ -197,6 +209,86 @@ def test_non_interactive_cli_company_name_alias() -> None:
     assert intake.authorized_scope == "10.20.30.0/24"
 
 
+def test_cli_package_skips_package_prompt() -> None:
+    config = AppConfig()
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "advanced",
+            "--consent-confirmed",
+        ]
+    )
+    ui = DummyUi()
+
+    intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=_auto_context())  # type: ignore[arg-type]
+
+    assert ui.called is False
+    assert intake.package == "advanced"
+
+
+def test_config_package_used_in_non_interactive_mode() -> None:
+    config = AppConfig()
+    config.assessment.client_name = "Contoso"
+    config.assessment.package = "standard"
+    config.assessment.consent_confirmed = True
+    args = build_parser().parse_args(["--non-interactive"])
+
+    intake = _resolve_intake(args=args, config=config, ui=DummyUi(), auto_context=_auto_context())  # type: ignore[arg-type]
+
+    assert intake.package == "standard"
+
+
+def test_basic_selected_allows_local_endpoint_mode() -> None:
+    config = AppConfig()
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "basic",
+            "--non-interactive",
+            "--consent-confirmed",
+        ]
+    )
+
+    intake = _resolve_intake(
+        args=args,
+        config=config,
+        ui=DummyUi(),
+        auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+    )  # type: ignore[arg-type]
+
+    assert intake.package == "basic"
+    assert intake.authorized_scope == "local-host-only"
+
+
+def test_interactive_standard_scope_prompt_when_auto_scope_fails() -> None:
+    class ScopeUi(DummyUi):
+        def ask_approved_scope(self, package: str) -> str:
+            assert package == "standard"
+            return "10.0.180.0/24"
+
+    config = AppConfig()
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "standard",
+            "--consent-confirmed",
+        ]
+    )
+    context = _auto_context(scope="local-host-only", source="localhost_only_fallback")
+
+    intake = _resolve_intake(args=args, config=config, ui=ScopeUi(), auto_context=context)  # type: ignore[arg-type]
+
+    assert intake.package == "standard"
+    assert intake.authorized_scope == "10.0.180.0/24"
+    assert context.scope_source == "cli_scope"
+
+
 def test_cli_approved_scope_overrides_auto_detected_scope() -> None:
     config = AppConfig()
     args = build_parser().parse_args(
@@ -262,7 +354,12 @@ def test_standard_blocks_localhost_fallback_by_default() -> None:
         )  # type: ignore[arg-type]
 
 
-def test_interactive_prompt_result_cannot_bypass_localhost_guard() -> None:
+def test_interactive_prompt_result_requests_scope_for_standard_localhost() -> None:
+    class ScopeUi(DummyUi):
+        def ask_approved_scope(self, package: str) -> str:
+            assert package == "standard"
+            return "10.0.180.0/24"
+
     config = AppConfig()
     args = build_parser().parse_args([])
     resolved = AssessmentIntake(
@@ -275,13 +372,14 @@ def test_interactive_prompt_result_cannot_bypass_localhost_guard() -> None:
         consent_confirmed=True,
     )
 
-    with pytest.raises(ValueError, match="localhost-only fallback is blocked"):
-        _resolve_intake(
-            args=args,
-            config=config,
-            ui=DummyUi(result=resolved),
-            auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
-        )  # type: ignore[arg-type]
+    intake = _resolve_intake(
+        args=args,
+        config=config,
+        ui=ScopeUi(result=resolved),
+        auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+    )  # type: ignore[arg-type]
+
+    assert intake.authorized_scope == "10.0.180.0/24"
 
 
 def test_standard_allows_localhost_fallback_when_explicitly_configured() -> None:
@@ -391,8 +489,13 @@ def test_visual_launch_summary_handles_non_rich_console(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "Run Contract" in output
+    assert "Company: Client" in output
+    assert "Package: standard" in output
+    assert "Mode: Standard company-level" in output
+    assert "Scope: 10.0.0.0/24" in output
     assert "headless" in output
     assert "auto_detected_local_subnets" in output
+    assert "Network assessment: enabled" in output
     assert "limited" in output
 
 

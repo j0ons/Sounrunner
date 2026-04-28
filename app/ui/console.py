@@ -83,7 +83,7 @@ class ConsoleUi:
         prompt_optional: bool = False,
     ) -> AssessmentIntake:
         normalized = _normalize_intake_seed(seed)
-        client = normalized.client_name or self._ask_required("Company name")
+        client = normalized.client_name or self._ask_required("Company/entity name")
         package = _validated_package(normalized.package) or self._ask_package()
         site = normalized.site or "Auto-detected"
         operator = normalized.operator_name or getpass.getuser()
@@ -115,6 +115,27 @@ class ConsoleUi:
             cloud_tenants=list(normalized.cloud_tenants),
         )
 
+    def ask_approved_scope(self, package: str) -> str:
+        """Ask for explicit approved scope when company mode cannot auto-detect one."""
+
+        while True:
+            scope = self._ask(
+                f"Approved company scope CIDR required for {package.title()}",
+                default="",
+            )
+            if not scope:
+                self.error("Approved scope cannot be blank for Standard/Advanced company-level assessments.")
+                continue
+            try:
+                parsed = ScopePolicy.parse(scope)
+            except ValueError as exc:
+                self.error(str(exc))
+                continue
+            if parsed.local_only:
+                self.error("Standard/Advanced require a company CIDR scope, not local-host-only.")
+                continue
+            return scope
+
     def print_launch_summary(
         self,
         intake: AssessmentIntake,
@@ -126,19 +147,31 @@ class ConsoleUi:
     ) -> None:
         warnings = warnings or []
         context = context or {}
+        company = intake.client_name
+        mode = str(context.get("assessment_mode", _mode_for_package(intake.package)))
+        remote_strategy = str(context.get("remote_strategy", "not evaluated"))
+        network_enabled = str(context.get("network_assessment", "enabled" if intake.package in {"standard", "advanced"} else "disabled"))
         if self.console and Panel and Table:
             table = Table(show_header=True, header_style="bold bright_cyan")
+            table.add_column("Company")
             table.add_column("Package")
+            table.add_column("Mode")
             table.add_column("Launch")
             table.add_column("Scope")
             table.add_column("Scope Source")
+            table.add_column("Remote")
+            table.add_column("Network")
             table.add_column("Operator")
             table.add_column("Report")
             table.add_row(
+                company,
                 intake.package,
+                mode,
                 "headless" if non_interactive else "interactive",
                 intake.authorized_scope,
                 str(context.get("scope_source", "config_or_manual")),
+                remote_strategy,
+                network_enabled,
                 intake.operator_name,
                 report_mode,
             )
@@ -159,13 +192,17 @@ class ConsoleUi:
             return
         lines = [
             "Run Contract",
+            f"Company: {company}",
             f"Package: {intake.package}",
-                f"Launch: {'headless' if non_interactive else 'interactive'}",
-                f"Scope: {intake.authorized_scope}",
-                f"Scope source: {context.get('scope_source', 'config_or_manual')}",
-                f"Operator: {intake.operator_name}",
-                f"Report: {report_mode}",
-            ]
+            f"Mode: {mode}",
+            f"Launch: {'headless' if non_interactive else 'interactive'}",
+            f"Scope: {intake.authorized_scope}",
+            f"Scope source: {context.get('scope_source', 'config_or_manual')}",
+            f"Remote strategy: {remote_strategy}",
+            f"Network assessment: {network_enabled}",
+            f"Operator: {intake.operator_name}",
+            f"Report: {report_mode}",
+        ]
         for item in warnings:
             lines.append(f"Warning: {item}")
         lines.extend(_auto_scope_lines(context))
@@ -442,13 +479,31 @@ class ConsoleUi:
 
     def _ask_package(self) -> str:
         while True:
-            package = self._ask(
-                "Assessment package [basic/standard/advanced]",
-                default="basic",
-            ).lower()
-            if package in VALID_PACKAGES:
-                return package
-            self.error("Assessment package must be one of: basic, standard, advanced.")
+            self._print(
+                "\nAssessment package:\n"
+                "[1] Basic\n"
+                "    Local endpoint validation and light network exposure review.\n"
+                "    Best for quick workstation/server baseline.\n\n"
+                "[2] Standard\n"
+                "    Company-level network discovery, exposure assessment, endpoint posture where available, and prioritized remediation roadmap.\n"
+                "    Best for normal client assessment.\n\n"
+                "[3] Advanced\n"
+                "    Standard assessment plus business continuity, ransomware readiness, policy/SOP gaps, recovery priorities, and 30/60/90-day plan.\n"
+                "    Best for management-level full assessment.",
+                style="bright_cyan",
+            )
+            package = self._ask("Select package", default="standard").lower()
+            mapped = {
+                "1": "basic",
+                "basic": "basic",
+                "2": "standard",
+                "standard": "standard",
+                "3": "advanced",
+                "advanced": "advanced",
+            }.get(package, "")
+            if mapped:
+                return mapped
+            self.error("Invalid package selection. Enter 1/basic, 2/standard, or 3/advanced.")
 
     def _ask_scope(self) -> str:
         while True:
@@ -718,6 +773,14 @@ def _auto_scope_lines(context: dict[str, object]) -> list[str]:
             )
         )
     return lines
+
+
+def _mode_for_package(package: str) -> str:
+    if package == "basic":
+        return "Basic local"
+    if package == "advanced":
+        return "Advanced company-level"
+    return "Standard company-level"
 
 
 def _list_count(value: object) -> int:

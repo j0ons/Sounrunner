@@ -33,6 +33,21 @@ def test_collect_intake_only_prompts_for_company_and_package(monkeypatch) -> Non
     assert intake.consent_confirmed is True
 
 
+def test_interactive_package_menu_appears_when_package_missing(monkeypatch, capsys) -> None:
+    ui = ConsoleUi(app_version="test")
+    ui.console = None
+    _set_inputs(monkeypatch, ["Client", ""])
+
+    intake = ui.collect_intake()
+    output = capsys.readouterr().out
+
+    assert intake.package == "standard"
+    assert "Assessment package:" in output
+    assert "[1] Basic" in output
+    assert "[2] Standard" in output
+    assert "[3] Advanced" in output
+
+
 def test_collect_intake_reprompts_invalid_package(monkeypatch, capsys) -> None:
     ui = ConsoleUi(app_version="test")
     ui.console = None
@@ -41,7 +56,7 @@ def test_collect_intake_reprompts_invalid_package(monkeypatch, capsys) -> None:
     intake = ui.collect_intake()
 
     assert intake.package == "advanced"
-    assert "Assessment package must be one of: basic, standard, advanced." in capsys.readouterr().out
+    assert "Invalid package selection. Enter 1/basic, 2/standard, or 3/advanced." in capsys.readouterr().out
 
 
 def test_complete_intake_drops_invalid_allowlist_seed_without_prompt(monkeypatch, capsys) -> None:
@@ -90,7 +105,7 @@ def test_collect_intake_interactive_basic_run_input_normalization(monkeypatch) -
     ui = ConsoleUi(app_version="test")
     ui.console = None
     monkeypatch.setattr("app.ui.console.getpass.getuser", lambda: "Operator")
-    _set_inputs(monkeypatch, [" Client ", None])
+    _set_inputs(monkeypatch, [" Client ", "1"])
 
     intake = ui.collect_intake()
 
