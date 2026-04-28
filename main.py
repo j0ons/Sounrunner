@@ -102,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use approved scopes from config without prompting for scope.",
     )
     parser.add_argument(
+        "--approved-scope",
+        type=str,
+        default="",
+        help="Explicit approved CIDR scope override. Example: --approved-scope 10.0.180.0/24",
+    )
+    parser.add_argument(
         "--consent-confirmed",
         action="store_true",
         help="Confirm that written authorization and approved scope have already been validated for this run.",
@@ -182,7 +188,10 @@ def main() -> int:
     if args.debug_auto_scope:
         try:
             config = AppConfig.load(args.config, data_dir=args.data_dir, log_dir=args.log_dir)
+            cli_scope = _apply_cli_scope_override(args, config)
             context = detect_enterprise_context(config)
+            if cli_scope:
+                _mark_cli_scope(context, cli_scope)
         except Exception as exc:  # noqa: BLE001 - debug command must report exact blocker.
             print(f"Auto-scope debug failed: {exc}")
             return 1
@@ -207,6 +216,7 @@ def main() -> int:
         if config is None:
             ui.error("Configuration could not be loaded.")
             return 2
+        cli_scope = _apply_cli_scope_override(args, config)
         if args.show_queue:
             ui.print_queue(inspect_callback_queue(config))
             return 0
@@ -221,6 +231,8 @@ def main() -> int:
 
         ui.print_phase("Launch", "Detecting local enterprise context and auto-scope.")
         auto_context = detect_enterprise_context(config)
+        if cli_scope:
+            _mark_cli_scope(auto_context, cli_scope)
         apply_auto_context_to_config(config, auto_context)
         intake = _resolve_intake(args=args, config=config, ui=ui, auto_context=auto_context)
         report_mode = _resolve_report_mode(args.report_mode, config, intake.package)
@@ -333,7 +345,7 @@ def _resolve_intake(
     intake = _build_seed_intake(args, config, context)
     intake = _apply_config_defaults(intake, config)
     if args.non_interactive:
-        errors = _launch_validation_errors(intake)
+        errors = _launch_validation_errors(intake, config)
         if errors:
             raise ValueError(
                 "Non-interactive launch validation failed: "
@@ -341,9 +353,15 @@ def _resolve_intake(
                 + ". Supply valid values via CLI or config."
             )
         return intake
-    errors = _launch_validation_errors(intake)
+    errors = _launch_validation_errors(intake, config)
     if errors and _prompt_can_fix(errors):
-        return ui.complete_intake(intake, prompt_optional=False)
+        resolved = ui.complete_intake(intake, prompt_optional=False)
+        resolved_errors = _launch_validation_errors(resolved, config)
+        if resolved_errors:
+            raise ValueError(
+                "Launch validation failed after intake: " + "; ".join(resolved_errors) + ". Fix CLI or config values."
+            )
+        return resolved
     if errors:
         raise ValueError("Launch validation failed: " + "; ".join(errors) + ". Fix CLI or config values.")
     return intake
@@ -355,8 +373,9 @@ def _build_seed_intake(
     context: AutoEnterpriseContext,
 ) -> AssessmentIntake:
     package = normalize_prompt_value(args.package or config.assessment.package).lower()
+    cli_scope = normalize_prompt_value(getattr(args, "approved_scope", ""))
     configured_scope = _scope_value_from_config(config)
-    scope = configured_scope or context.default_scope
+    scope = cli_scope or configured_scope or context.default_scope
     company_name = normalize_prompt_value(
         args.company_name or args.client_name or config.assessment.client_name
     )
@@ -403,11 +422,14 @@ def _missing_required_values(intake: AssessmentIntake) -> list[str]:
     return missing
 
 
-def _launch_validation_errors(intake: AssessmentIntake) -> list[str]:
+def _launch_validation_errors(intake: AssessmentIntake, config: AppConfig) -> list[str]:
     errors = [f"missing {item}" for item in _missing_required_values(intake)]
     package = normalize_prompt_value(intake.package).lower()
     if package and package not in {"basic", "standard", "advanced"}:
         errors.append("invalid package")
+    localhost_guard = _localhost_fallback_guard_error(intake, config)
+    if localhost_guard:
+        errors.append(localhost_guard)
     for label, values in [("host allowlist", intake.host_allowlist), ("host denylist", intake.host_denylist)]:
         error = _host_list_validation_error(label, values)
         if error:
@@ -426,6 +448,42 @@ def _launch_validation_errors(intake: AssessmentIntake) -> list[str]:
         except ValueError as exc:
             errors.append(str(exc))
     return errors
+
+
+def _apply_cli_scope_override(args: argparse.Namespace, config: AppConfig) -> str:
+    scope = normalize_prompt_value(getattr(args, "approved_scope", ""))
+    if not scope:
+        return ""
+    ScopePolicy.parse(scope)
+    config.assessment.approved_scope = scope
+    config.assessment.approved_scopes = []
+    return scope
+
+
+def _mark_cli_scope(context: AutoEnterpriseContext, scope: str) -> None:
+    context.scope_source = "cli_scope"
+    context.default_scope = scope
+    try:
+        parsed = ScopePolicy.parse(scope)
+        context.private_subnets = [str(network) for network in parsed.networks]
+    except ValueError:
+        context.private_subnets = [scope]
+
+
+def _localhost_fallback_guard_error(intake: AssessmentIntake, config: AppConfig) -> str:
+    package = normalize_prompt_value(intake.package).lower()
+    scope = normalize_prompt_value(intake.authorized_scope).lower()
+    if package not in {"standard", "advanced"}:
+        return ""
+    if scope not in {"local", "localhost", "local-host-only", "host-only"}:
+        return ""
+    if config.assessment.allow_localhost_fallback_for_company_modes:
+        return ""
+    return (
+        "Standard/Advanced require an approved or auto-detected private company scope. "
+        "localhost-only fallback is blocked unless "
+        "assessment.allow_localhost_fallback_for_company_modes is true."
+    )
 
 
 def _prompt_can_fix(errors: list[str]) -> bool:

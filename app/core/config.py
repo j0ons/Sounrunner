@@ -221,6 +221,7 @@ class AssessmentDefaults:
     scanner_sources: list[str] = field(default_factory=list)
     client_domain: str = ""
     auto_scope_allowed_adapter_keywords: list[str] = field(default_factory=list)
+    allow_localhost_fallback_for_company_modes: bool = False
 
 
 @dataclass(slots=True)

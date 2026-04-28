@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from app.core import auto_context
+from app.collectors.shell import CommandResult
 from app.core.auto_context import DetectedInterface
 from app.core.config import AppConfig
 
@@ -361,7 +364,7 @@ def test_windows_status_blank_valid_ethernet_with_default_route_is_selected() ->
     selected, diagnostics = auto_context._select_auto_scope_interfaces(interfaces, AppConfig())
 
     assert selected[0].subnet == "10.0.180.0/24"
-    assert diagnostics[0]["decision"] == "selected"
+    assert any(item["name"] == "Ethernet" and item["decision"] == "selected" for item in diagnostics)
 
 
 def test_auto_scope_debug_report_includes_final_selected_scope(monkeypatch) -> None:
@@ -388,6 +391,139 @@ def test_auto_scope_debug_report_includes_final_selected_scope(monkeypatch) -> N
     assert "final_selected_scope=10.0.180.0/24" in report
     assert "adapter=Ethernet" in report
     assert "decision=selected" in report
+
+
+def test_json_rows_from_stdout_accepts_top_level_array() -> None:
+    rows, error = auto_context._json_rows_from_stdout(
+        json.dumps([_win_row("Ethernet", "Realtek", "10.0.180.153", 24)])
+    )
+
+    assert error == ""
+    assert len(rows) == 1
+    assert rows[0]["InterfaceAlias"] == "Ethernet"
+
+
+def test_json_rows_from_stdout_accepts_single_object() -> None:
+    rows, error = auto_context._json_rows_from_stdout(
+        json.dumps(_win_row("Ethernet", "Realtek", "10.0.180.153", 24))
+    )
+
+    assert error == ""
+    assert len(rows) == 1
+    assert rows[0]["InterfaceAlias"] == "Ethernet"
+
+
+def test_empty_powershell_result_triggers_get_netipaddress_fallback(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_run_powershell(script: str, timeout_seconds: int = 30, **_kwargs) -> CommandResult:
+        calls.append(script)
+        if "Get-NetAdapter" in script:
+            return CommandResult(["powershell"], 0, "", "")
+        return CommandResult(
+            ["powershell"],
+            0,
+            json.dumps(
+                [
+                    {
+                        "Source": "fallback_get_netipaddress",
+                        "InterfaceAlias": "Ethernet",
+                        "InterfaceIndex": 12,
+                        "IPAddress": "10.0.180.153",
+                        "PrefixLength": 24,
+                        "AddressState": "Preferred",
+                    }
+                ]
+            ),
+            "",
+        )
+
+    def fake_run_command(command: list[str], timeout_seconds: int = 20, **_kwargs) -> CommandResult:
+        if command[:2] == ["route", "print"]:
+            return CommandResult(command, 0, _route_print_output(), "")
+        return CommandResult(command, 0, "", "")
+
+    monkeypatch.setattr(auto_context, "run_powershell", fake_run_powershell)
+    monkeypatch.setattr(auto_context, "run_command", fake_run_command)
+
+    rows, debug = auto_context.collect_windows_adapter_rows()
+    interfaces = auto_context._interfaces_from_windows_payload({"items": rows})
+    selected, _diagnostics = auto_context._select_auto_scope_interfaces(interfaces, AppConfig())
+
+    assert len(calls) == 2
+    assert rows[0]["IPv4Address"] == "10.0.180.153"
+    assert rows[0]["IPv4DefaultGateway"] == "10.0.180.1"
+    assert rows[0]["IsPrimaryRoute"] is True
+    assert selected[0].subnet == "10.0.180.0/24"
+    assert [item["name"] for item in debug["collector_attempts"]] == [
+        "merged_get_netipaddress_get_netadapter_get_netroute_get_dnsclient",
+        "fallback_get_netipaddress",
+        "fallback_route_print",
+    ]
+
+
+def test_ipconfig_fallback_parses_valid_ethernet(monkeypatch) -> None:
+    def fake_run_powershell(_script: str, timeout_seconds: int = 30, **_kwargs) -> CommandResult:
+        return CommandResult(["powershell"], 0, "[]", "")
+
+    def fake_run_command(command: list[str], timeout_seconds: int = 20, **_kwargs) -> CommandResult:
+        if command[:2] == ["route", "print"]:
+            return CommandResult(command, 0, _route_print_output(), "")
+        if command[:2] == ["ipconfig", "/all"]:
+            return CommandResult(command, 0, _ipconfig_output(), "")
+        return CommandResult(command, 0, "", "")
+
+    monkeypatch.setattr(auto_context, "run_powershell", fake_run_powershell)
+    monkeypatch.setattr(auto_context, "run_command", fake_run_command)
+
+    rows, debug = auto_context.collect_windows_adapter_rows()
+    interfaces = auto_context._interfaces_from_windows_payload({"items": rows})
+    selected, diagnostics = auto_context._select_auto_scope_interfaces(interfaces, AppConfig())
+
+    assert selected[0].name == "Ethernet"
+    assert selected[0].subnet == "10.0.180.0/24"
+    assert selected[0].gateway == "10.0.180.1"
+    assert any(item["name"] == "Ethernet" and item["decision"] == "selected" for item in diagnostics)
+    assert any(item["name"] == "fallback_ipconfig_all" for item in debug["collector_attempts"])
+
+
+def test_debug_report_includes_collector_return_code_and_lengths(monkeypatch) -> None:
+    _patch_detection(
+        monkeypatch,
+        [
+            DetectedInterface(
+                name="Ethernet",
+                description="Realtek PCIe GbE Family Controller",
+                ip_address="10.0.180.153",
+                prefix_length=24,
+                subnet="10.0.180.0/24",
+            )
+        ],
+    )
+
+    context = auto_context.detect_enterprise_context(AppConfig())
+    context.auto_scope_debug = {
+        "platform_system": "Windows",
+        "is_windows": True,
+        "powershell_executable": "powershell.exe",
+        "collector_attempts": [
+            {
+                "name": "fallback_get_netipaddress",
+                "returncode": 0,
+                "stdout_length": 200,
+                "stderr_preview": "",
+                "parsed_rows": 1,
+                "json_error": "",
+                "timed_out": False,
+            }
+        ],
+        "raw_rows": [],
+    }
+    report = auto_context.auto_scope_debug_report(context)
+
+    assert "returncode=0" in report
+    assert "stdout_length=200" in report
+    assert "parsed_rows=1" in report
 
 
 def _patch_detection(monkeypatch, interfaces: list[DetectedInterface]) -> None:
@@ -426,3 +562,33 @@ def _win_row(
         "RouteMetric": route_metric,
         "InterfaceMetric": interface_metric,
     }
+
+
+def _route_print_output() -> str:
+    return """
+IPv4 Route Table
+===========================================================================
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0       10.0.180.1    10.0.180.153     25
+===========================================================================
+"""
+
+
+def _ipconfig_output() -> str:
+    return """
+Windows IP Configuration
+
+Ethernet adapter Ethernet:
+
+   Description . . . . . . . . . . . : Realtek PCIe GbE Family Controller
+   IPv4 Address. . . . . . . . . . . : 10.0.180.153(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : 10.0.180.1
+
+Ethernet adapter VMware Network Adapter VMnet8:
+
+   Description . . . . . . . . . . . : VMware Virtual Ethernet Adapter for VMnet8
+   IPv4 Address. . . . . . . . . . . : 192.168.126.1(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+"""

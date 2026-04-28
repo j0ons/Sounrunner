@@ -25,6 +25,8 @@ assessment:
   client_domain: ""
   # Optional escape hatch for known legitimate lab adapters. Leave empty by default.
   auto_scope_allowed_adapter_keywords: []
+  # Company-wide modes should not silently run localhost-only if auto-scope fails.
+  allow_localhost_fallback_for_company_modes: false
 orchestration:
   enabled: true
   max_workers: 5

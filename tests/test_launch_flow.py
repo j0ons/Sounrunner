@@ -8,7 +8,7 @@ from app.core.auto_context import AutoEnterpriseContext, DetectedInterface
 from app.core.config import AppConfig
 from app.core.session import AssessmentIntake
 from app.ui.console import ConsoleUi
-from main import _launch_warnings, _resolve_intake, build_parser
+from main import _apply_cli_scope_override, _launch_warnings, _mark_cli_scope, _resolve_intake, build_parser
 
 
 class DummyUi:
@@ -195,6 +195,117 @@ def test_non_interactive_cli_company_name_alias() -> None:
     assert intake.client_name == "Contoso"
     assert intake.package == "standard"
     assert intake.authorized_scope == "10.20.30.0/24"
+
+
+def test_cli_approved_scope_overrides_auto_detected_scope() -> None:
+    config = AppConfig()
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "standard",
+            "--approved-scope",
+            "10.0.180.0/24",
+            "--non-interactive",
+            "--consent-confirmed",
+        ]
+    )
+    cli_scope = _apply_cli_scope_override(args, config)
+    context = _auto_context(scope="10.20.30.0/24")
+    _mark_cli_scope(context, cli_scope)
+
+    intake = _resolve_intake(args=args, config=config, ui=DummyUi(), auto_context=context)  # type: ignore[arg-type]
+
+    assert intake.authorized_scope == "10.0.180.0/24"
+    assert context.scope_source == "cli_scope"
+    assert context.default_scope == "10.0.180.0/24"
+
+
+def test_config_scope_beats_failed_auto_scope() -> None:
+    config = AppConfig()
+    config.assessment.client_name = "Contoso"
+    config.assessment.package = "standard"
+    config.assessment.consent_confirmed = True
+    config.assessment.approved_scopes = ["10.0.180.0/24"]
+    args = build_parser().parse_args(["--non-interactive"])
+
+    intake = _resolve_intake(
+        args=args,
+        config=config,
+        ui=DummyUi(),
+        auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+    )  # type: ignore[arg-type]
+
+    assert intake.authorized_scope == "10.0.180.0/24"
+
+
+def test_standard_blocks_localhost_fallback_by_default() -> None:
+    config = AppConfig()
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "standard",
+            "--non-interactive",
+            "--consent-confirmed",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="localhost-only fallback is blocked"):
+        _resolve_intake(
+            args=args,
+            config=config,
+            ui=DummyUi(),
+            auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+        )  # type: ignore[arg-type]
+
+
+def test_interactive_prompt_result_cannot_bypass_localhost_guard() -> None:
+    config = AppConfig()
+    args = build_parser().parse_args([])
+    resolved = AssessmentIntake(
+        client_name="Contoso",
+        site="Local Network",
+        operator_name="Operator",
+        package="standard",
+        authorized_scope="local-host-only",
+        scope_notes="test",
+        consent_confirmed=True,
+    )
+
+    with pytest.raises(ValueError, match="localhost-only fallback is blocked"):
+        _resolve_intake(
+            args=args,
+            config=config,
+            ui=DummyUi(result=resolved),
+            auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+        )  # type: ignore[arg-type]
+
+
+def test_standard_allows_localhost_fallback_when_explicitly_configured() -> None:
+    config = AppConfig()
+    config.assessment.allow_localhost_fallback_for_company_modes = True
+    args = build_parser().parse_args(
+        [
+            "--company-name",
+            "Contoso",
+            "--package",
+            "standard",
+            "--non-interactive",
+            "--consent-confirmed",
+        ]
+    )
+
+    intake = _resolve_intake(
+        args=args,
+        config=config,
+        ui=DummyUi(),
+        auto_context=_auto_context(scope="local-host-only", source="localhost_only_fallback"),
+    )  # type: ignore[arg-type]
+
+    assert intake.authorized_scope == "local-host-only"
 
 
 def test_interactive_launch_fails_cleanly_on_invalid_config_scope(tmp_path: Path) -> None:

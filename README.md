@@ -226,6 +226,7 @@ Supported launch overrides:
 - `--site`
 - `--operator`
 - `--scope-from-config`
+- `--approved-scope 10.0.180.0/24`
 - `--consent-confirmed`
 - `--report-mode`
 - existing `--preflight`, `--healthcheck`, `--show-queue`, and `--retry-callbacks`
@@ -233,16 +234,33 @@ Supported launch overrides:
 Behavior:
 
 - If config already contains approved scopes, they are used as the assessment boundary.
+- If `--approved-scope` is supplied, it overrides config and auto-detection for that run and records `scope_source=cli_scope`.
 - If config scopes are absent, Standard/Advanced use auto-detected directly connected private subnets as the default company scope.
-- If only loopback or non-private interfaces are detected, the runner continues with `local-host-only` and warns that the run is not representative of estate coverage.
+- If only loopback or non-private interfaces are detected, Basic can use `local-host-only`. Standard/Advanced block localhost fallback by default unless `assessment.allow_localhost_fallback_for_company_modes: true` is explicitly configured.
 - Interactive prompting is reserved for company name and package.
 - Optional fields do not force extra prompts during company-wide runs.
-- If Standard or Advanced is launched with `local-host-only`, the runner warns that estate coverage is limited.
+- If Standard or Advanced is explicitly allowed to run with `local-host-only`, the report warns that estate coverage is limited.
 
 One-command Standard launch:
 
 ```powershell
 C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard
+```
+
+Explicit approved-scope launch when auto-scope cannot read Windows adapter evidence:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe --company-name "Client Name" --package standard --approved-scope 10.0.180.0/24
+```
+
+Config-approved scope launch:
+
+```powershell
+C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
+  --config C:\SounRunner\config\config.yaml `
+  --package standard `
+  --non-interactive `
+  --consent-confirmed
 ```
 
 Example headless Advanced launch:
@@ -262,11 +280,12 @@ C:\SounRunner\app\SounAlHosnAssessmentRunner.exe `
 
 Standard and Advanced determine scope in this order:
 
-1. `assessment.approved_scopes` or `assessment.approved_scope` from config.
-2. The highest-confidence directly connected private RFC1918 IPv4 subnet from active local interfaces, with the default IPv4 route interface preferred.
-3. `local-host-only` fallback when no private connected subnet exists.
+1. `--approved-scope` from CLI for the current authorized run.
+2. `assessment.approved_scopes` or `assessment.approved_scope` from config.
+3. The highest-confidence directly connected private RFC1918 IPv4 subnet from active local interfaces, with the default IPv4 route interface preferred.
+4. `local-host-only` fallback for Basic only, unless company-mode localhost fallback is explicitly allowed in config.
 
-The runner records the scope source as `config_scope`, `auto_detected_local_subnets`, or `localhost_only_fallback`. It does not scan arbitrary routed networks just because they are reachable. Broader routed networks must be explicitly approved in config.
+The runner records the scope source as `cli_scope`, `config_scope`, `auto_detected_local_subnets`, or `localhost_only_fallback`. It does not scan arbitrary routed networks just because they are reachable. Broader routed networks must be explicitly approved by CLI or config.
 
 Auto-scope ignores loopback, APIPA, CGNAT/Tailscale, Docker, WSL, Hyper-V internal, VMware, VirtualBox, Default Switch, host-only, NAT-only, ZeroTier, and VPN-style adapters by default. Use `assessment.auto_scope_allowed_adapter_keywords` only when a known lab adapter is explicitly approved for auto-scope.
 
@@ -274,7 +293,7 @@ Preflight includes an `auto_scope_detection` row showing detected adapters, igno
 
 Detected enterprise context includes hostname, FQDN, domain join state, DNS suffixes, local site heuristic, inferred AD domain, inferred email domain, and directly connected private subnets.
 
-Windows auto-scope uses merged read-only evidence from `Get-NetIPAddress`, `Get-NetAdapter`, `Get-NetRoute`, and `Get-DnsClient`. It prefers the physical Ethernet/Wi-Fi adapter on the active default IPv4 route and ignores APIPA, loopback, CGNAT/Tailscale, Hyper-V/vEthernet, VMware, VirtualBox, Docker, WSL, VPN, host-only, and NAT-only adapters unless explicitly allowed.
+Windows auto-scope uses merged read-only evidence from `Get-NetIPAddress`, `Get-NetAdapter`, `Get-NetRoute`, and `Get-DnsClient`. If that merged collector returns no rows, it falls back to `Get-NetIPAddress`, `route print -4`, and `ipconfig /all` parsing. It prefers the physical Ethernet/Wi-Fi adapter on the active default IPv4 route and ignores APIPA, loopback, CGNAT/Tailscale, Hyper-V/vEthernet, VMware, VirtualBox, Docker, WSL, VPN, host-only, and NAT-only adapters unless explicitly allowed.
 
 Debug auto-scope decisions without starting an assessment:
 
@@ -283,6 +302,8 @@ python .\main.py --debug-auto-scope
 ```
 
 The debug output shows raw adapter rows, calculated CIDR, default-route status, ignored/selected decision, ignore reason, and final selected scope.
+
+Use `--debug-auto-scope` when Standard/Advanced unexpectedly report `localhost_only_fallback`. The output includes platform, PowerShell path, each collector attempt, return code, stdout length, stderr preview, parsed row count, raw adapter summaries, ignored reasons, and the final selected scope. If the Windows collector is blocked by execution policy, endpoint controls, or missing PowerShell cmdlets, use the explicit approved scope mode for the authorized subnet.
 
 ## Automatic Module Activation
 
@@ -471,6 +492,7 @@ assessment:
     "192.168.10.0/24": "HQ"
     "192.168.20.0/24": "Branch-A"
   client_domain: "example.com"
+  allow_localhost_fallback_for_company_modes: false
 ```
 
 Remote Windows collection example:
